@@ -189,6 +189,335 @@ else if (typeof define === 'function' && define['amd'])
 else if (typeof exports === 'object')
   exports["ggwave_factory"] = ggwave_factory;
 </script>
+<script>/* Rausch-Modem: Die Daten stecken im Rauschen selbst.
+   Jedes Byte wird als eines von 256 pseudozufälligen, bandbegrenzten Rauschmustern gesendet (Spreizband).
+   Der Empfänger vergleicht jedes empfangene Stück mit allen Mustern (Korrelation) und nimmt das ähnlichste.
+   Synchronisation per doppeltem Startmuster (Schmidl-Cox), Fehlerkorrektur per Reed-Solomon, Prüfsumme per CRC-16. */
+var Modem = (function(){
+'use strict';
+var FS=48000, L=2048, CP=384, SYM=L+CP, DF=FS/L, SB=8, TW=96, M=256;
+var BANDS=[
+  {id:0, key:'n1', f1:400,  f2:2400,  pink:true,  clip:true},
+  {id:1, key:'n2', f1:2500, f2:6500,  pink:false, clip:true},
+  {id:2, key:'n3', f1:9000, f2:13000, pink:false, clip:false},
+  {id:3, key:'n4', f1:12000,f2:16000, pink:false, clip:false}
+];
+
+/* ---------- FFT (radix 2, Größe 2048) ---------- */
+var rev=new Uint16Array(L), cosT=new Float64Array(L/2), sinT=new Float64Array(L/2);
+(function(){ var bits=Math.log2(L); for(var i=0;i<L;i++){ var r=0,x=i; for(var b=0;b<bits;b++){ r=(r<<1)|(x&1); x>>=1; } rev[i]=r; }
+  for(var k=0;k<L/2;k++){ cosT[k]=Math.cos(2*Math.PI*k/L); sinT[k]=-Math.sin(2*Math.PI*k/L); } })();
+function fft(re,im,inv){
+  var i,j,t;
+  for(i=0;i<L;i++){ j=rev[i]; if(j>i){ t=re[i]; re[i]=re[j]; re[j]=t; t=im[i]; im[i]=im[j]; im[j]=t; } }
+  for(var size=2;size<=L;size<<=1){
+    var half=size>>1, step=L/size;
+    for(i=0;i<L;i+=size){
+      for(j=0;j<half;j++){
+        var k=j*step, wr=cosT[k], wi=inv?-sinT[k]:sinT[k], a=i+j, b=a+half;
+        var tr=re[b]*wr-im[b]*wi, ti=re[b]*wi+im[b]*wr;
+        re[b]=re[a]-tr; im[b]=im[a]-ti; re[a]+=tr; im[a]+=ti;
+      }
+    }
+  }
+}
+function mulberry(a){ return function(){ a=a+0x6D2B79F5|0; var t=Math.imul(a^a>>>15,1|a); t=t+Math.imul(t^t>>>7,61|t)^t; return ((t^t>>>14)>>>0)/4294967296; }; }
+
+/* ---------- Muster je Frequenzband ---------- */
+function setupBand(b){
+  if(b.ready) return b;
+  var k1=Math.ceil(b.f1/DF), k2=Math.floor(b.f2/DF), nb=k2-k1+1, i, p;
+  var amp=new Float32Array(nb), edgeN=Math.max(2, Math.round(nb*0.06));
+  for(i=0;i<nb;i++){
+    var f=(k1+i)*DF, a=b.pink?Math.sqrt(b.f1/f):1, e=Math.min(i,nb-1-i);
+    if(e<edgeN) a*=0.5-0.5*Math.cos(Math.PI*(e+0.5)/edgeN);
+    amp[i]=a;
+  }
+  var nPat=M+2, rnd=mulberry(0x5eed0000 + b.id*7919 + 17);
+  var pc=new Float32Array(nPat*nb), ps=new Float32Array(nPat*nb);
+  for(p=0;p<nPat;p++) for(i=0;i<nb;i++){ var ph=rnd()*2*Math.PI; pc[p*nb+i]=amp[i]*Math.cos(ph); ps[p*nb+i]=amp[i]*Math.sin(ph); }
+  var nsb=Math.ceil(nb/SB), sbE=new Float64Array(nsb);
+  for(i=0;i<nb;i++) sbE[(i/SB)|0]+=amp[i]*amp[i];
+  b.k1=k1; b.nb=nb; b.pc=pc; b.ps=ps; b.nsb=nsb; b.sbE=sbE; b.wave=[]; b.ready=true;
+  return b;
+}
+function patWave(b,p){
+  if(b.wave[p]) return b.wave[p];
+  var re=new Float64Array(L), im=new Float64Array(L), i, n;
+  for(i=0;i<b.nb;i++){ var k=b.k1+i; re[k]=b.pc[p*b.nb+i]; im[k]=b.ps[p*b.nb+i]; re[L-k]=re[k]; im[L-k]=-im[k]; }
+  fft(re,im,true);
+  var w=new Float32Array(L), s=0;
+  for(n=0;n<L;n++) s+=re[n]*re[n];
+  var g=1/Math.sqrt(s/L+1e-20);
+  for(n=0;n<L;n++) w[n]=re[n]*g;
+  b.wave[p]=w; return w;
+}
+
+/* ---------- Reed-Solomon GF(256) ---------- */
+var GEXP=new Uint8Array(512), GLOG=new Uint8Array(256);
+(function(){ var x=1; for(var i=0;i<255;i++){ GEXP[i]=x; GLOG[x]=i; x<<=1; if(x&256) x^=0x11d; } for(i=255;i<512;i++) GEXP[i]=GEXP[i-255]; })();
+function gmul(a,b){ return (a&&b)?GEXP[GLOG[a]+GLOG[b]]:0; }
+function gdiv(a,b){ return a?GEXP[(GLOG[a]+255-GLOG[b])%255]:0; }
+function gpow(x,p){ return GEXP[((GLOG[x]*p)%255+255)%255]; }
+function ginv(x){ return GEXP[255-GLOG[x]]; }
+function pscale(p,x){ return p.map(function(c){ return gmul(c,x); }); }
+function padd(p,q){ var n=Math.max(p.length,q.length), r=new Array(n).fill(0), i;
+  for(i=0;i<p.length;i++) r[i+n-p.length]=p[i]; for(i=0;i<q.length;i++) r[i+n-q.length]^=q[i]; return r; }
+function pmul(p,q){ var r=new Array(p.length+q.length-1).fill(0); for(var j=0;j<q.length;j++) for(var i=0;i<p.length;i++) r[i+j]^=gmul(p[i],q[j]); return r; }
+function peval(p,x){ var y=p[0]; for(var i=1;i<p.length;i++) y=gmul(y,x)^p[i]; return y; }
+function pdiv(dividend, divisor){
+  var out=dividend.slice(), i, j;
+  for(i=0;i<dividend.length-(divisor.length-1);i++){ var c=out[i]; if(c) for(j=1;j<divisor.length;j++) if(divisor[j]) out[i+j]^=gmul(divisor[j],c); }
+  var sep=divisor.length-1; return [out.slice(0,out.length-sep), out.slice(out.length-sep)];
+}
+var genCache={};
+function genPoly(n){ if(genCache[n]) return genCache[n]; var g=[1]; for(var i=0;i<n;i++) g=pmul(g,[1,gpow(2,i)]); return genCache[n]=g; }
+function rsEncode(msg, n){
+  var m=Array.from(msg), g=genPoly(n), padded=m.concat(new Array(n).fill(0));
+  var rem=pdiv(padded,g)[1];
+  return m.concat(rem);
+}
+function rsDecode(cw, n){
+  var msg=Array.from(cw), i, j, synd=[0];
+  var any=false;
+  for(i=0;i<n;i++){ var s=peval(msg,gpow(2,i)); synd.push(s); if(s) any=true; }
+  if(!any) return msg.slice(0,msg.length-n);
+  // Berlekamp-Massey
+  var errLoc=[1], oldLoc=[1];
+  for(i=0;i<n;i++){
+    var K=i+1, delta=synd[K];
+    for(j=1;j<errLoc.length;j++) delta^=gmul(errLoc[errLoc.length-1-j], synd[K-j]);
+    oldLoc=oldLoc.concat([0]);
+    if(delta){
+      if(oldLoc.length>errLoc.length){ var nl=pscale(oldLoc,delta); oldLoc=pscale(errLoc,ginv(delta)); errLoc=nl; }
+      errLoc=padd(errLoc, pscale(oldLoc,delta));
+    }
+  }
+  while(errLoc.length && errLoc[0]===0) errLoc.shift();
+  var errs=errLoc.length-1;
+  if(errs*2>n) return null;
+  // Chien-Suche
+  var rl=errLoc.slice().reverse(), pos=[];
+  for(i=0;i<msg.length;i++) if(peval(rl,gpow(2,i))===0) pos.push(msg.length-1-i);
+  if(pos.length!==errs) return null;
+  // Forney
+  var coefPos=pos.map(function(p){ return msg.length-1-p; });
+  var eLoc=[1];
+  coefPos.forEach(function(c){ eLoc=pmul(eLoc, padd([1],[gpow(2,c),0])); });
+  var sr=synd.slice().reverse();
+  var prod=pmul(sr,eLoc), div=[1].concat(new Array(eLoc.length).fill(0));
+  var errEval=pdiv(prod,div)[1].reverse();
+  var X=coefPos.map(function(c){ return gpow(2, c); });
+  var E=new Array(msg.length).fill(0);
+  for(i=0;i<X.length;i++){
+    var Xi=X[i], Xinv=ginv(Xi), lp=1;
+    for(j=0;j<X.length;j++) if(j!==i) lp=gmul(lp, 1^gmul(Xinv,X[j]));
+    if(!lp) return null;
+    var y=gmul(Xi, peval(errEval.slice().reverse(), Xinv));
+    E[pos[i]]=gdiv(y,lp);
+  }
+  for(i=0;i<msg.length;i++) msg[i]^=E[i];
+  for(i=0;i<n;i++) if(peval(msg,gpow(2,i))) return null;
+  return msg.slice(0,msg.length-n);
+}
+function crc16(b){ var c=0xFFFF; for(var i=0;i<b.length;i++){ c^=b[i]<<8; for(var k=0;k<8;k++) c=(c&0x8000)?((c<<1)^0x1021)&0xFFFF:(c<<1)&0xFFFF; } return c; }
+function nsymFor(k){ return 4+2*Math.floor((k+2)/12); }
+
+/* ---------- Senden ---------- */
+function encodeFrame(bytes, bandIdx, slow, opts){
+  opts=opts||{};
+  var b=setupBand(BANDS[bandIdx]), k=bytes.length;
+  if(k>63) throw new Error('zu lang');
+  var data=Array.from(bytes), c=crc16(bytes); data.push(c>>8, c&255);
+  var cw=rsEncode(data, nsymFor(k)), hdr=rsEncode([k|(slow?64:0)], 2);
+  var syms=hdr.concat(cw), rep=slow?2:1;
+  var preN=Math.round((opts.pre!==undefined?opts.pre:0.17)*FS/ L)*L, tailN=Math.round((opts.tail!==undefined?opts.tail:0.3)*FS/L)*L;
+  var bodyStart=preN, nData=syms.length*rep;
+  var total=preN + CP+3*L + nData*SYM + tailN + TW;
+  var out=new Float32Array(total), rnd=Math.random;
+  function put(w, start, cp, body, gainFn){
+    // Symbol mit zyklischem Präfix. Weiche Rampen: Anstieg in den ersten TW Takten (liegt im Präfix),
+    // Ausklang TW Takte über das Ende hinaus (liegt im Präfix des nächsten Symbols) – keine Knackser,
+    // und das Auswertefenster des Empfängers bleibt unberührt.
+    var len=cp+body;
+    for(var n=0; n<len+TW; n++){
+      var pos=start+n; if(pos>=total) break;
+      var g = n<TW ? 0.5-0.5*Math.cos(Math.PI*(n+0.5)/TW) : (n>=len ? 0.5+0.5*Math.cos(Math.PI*(n-len+0.5)/TW) : 1);
+      out[pos]+=w[((n-cp)%L+L)%L]*g*(gainFn?gainFn(pos):1);
+    }
+  }
+  // Ansteigende Welle (keine Daten), dann Startmuster
+  for(var p0=0;p0<preN;p0+=L) put(patWave(b, (rnd()*M)|0), p0, 0, L, function(pos){ var t=pos/preN; return 0.15+0.85*t*t; });
+  var A=patWave(b, M+(slow?1:0));
+  put(A, bodyStart, CP, 3*L, null);              // Startmuster: dreimal dasselbe Muster am Stück
+  var d0=bodyStart+CP+3*L;
+  for(var s=0;s<syms.length;s++) for(var r=0;r<rep;r++) put(patWave(b, syms[s]), d0+(s*rep+r)*SYM, CP, L, null);
+  var tStart=d0+nData*SYM;
+  for(var p1=0;p1<tailN;p1+=L) put(patWave(b,(rnd()*M)|0), tStart+p1, 0, L, function(pos){ var t=Math.min(1,(pos-tStart)/tailN); return (1-t)*(1-t); });
+  // sanftes An- und Abschwellen wie eine Welle
+  var bodyLen=tStart-bodyStart;
+  for(var i=bodyStart;i<tStart;i++){ var u=(i-bodyStart)/bodyLen; out[i]*=0.86+0.14*Math.sin(Math.PI*u); }
+  // Pegel: Spitze auf 1; bei tiefen Bändern sanft begrenzen (lauter), bei hohen nicht (keine hörbaren Verzerrungen)
+  var mx=0; for(i=0;i<total;i++){ var a=Math.abs(out[i]); if(a>mx) mx=a; }
+  var g=b.clip?2.2/mx:1/mx;
+  for(i=0;i<total;i++){ var x=out[i]*g; if(b.clip){ var ax=Math.abs(x); if(ax>0.75) x=Math.sign(x)*(0.75+0.25*Math.tanh((ax-0.75)/0.25)); } out[i]=x*0.98; }
+  return out;
+}
+function frameSeconds(k, slow){ var n=3+k+2+nsymFor(k); return (0.17*FS + CP+3*L + n*(slow?2:1)*SYM + 0.3*FS)/FS; }
+
+/* ---------- Empfangen ---------- */
+var RING=1<<19, MASK=RING-1;
+function biquad(type, f, q){
+  var w=2*Math.PI*f/FS, c=Math.cos(w), al=Math.sin(w)/(2*q), a0=1+al, b0,b1,b2;
+  if(type==='lp'){ b0=(1-c)/2; b1=1-c; b2=(1-c)/2; } else { b0=(1+c)/2; b1=-(1+c); b2=(1+c)/2; }
+  return {b0:b0/a0, b1:b1/a0, b2:b2/a0, a1:-2*c/a0, a2:(1-al)/a0, x1:0,x2:0,y1:0,y2:0};
+}
+function bq(f,x){ var y=f.b0*x+f.b1*f.x1+f.b2*f.x2-f.a1*f.y1-f.a2*f.y2; f.x2=f.x1; f.x1=x; f.y2=f.y1; f.y1=y; return y; }
+var DR=4*L, DMASK=DR-1;
+function Receiver(onFrame){
+  this.onFrame=onFrame; this.ring=new Float32Array(RING); this.N=0;
+  this.cands=[]; this.busyUntil=0; this.re=new Float64Array(L); this.im=new Float64Array(L);
+  this.stats={det:0, ok:0, fail:0};
+  BANDS.forEach(setupBand);
+  // Pro Frequenzband ein eigener Detektor auf dem gefilterten Signal: Rauschen außerhalb des Bandes stört so nicht
+  this.det=BANDS.map(function(b){
+    return {b:b.id, f:[biquad('hp',b.f1*0.92,0.707), biquad('hp',b.f1*0.92,0.707), biquad('lp',Math.min(b.f2*1.08,23000),0.707), biquad('lp',Math.min(b.f2*1.08,23000),0.707)],
+            r:new Float32Array(DR), P:0,R1:0,R2:0, since:0, inRun:false, runStart:0, runEnd:0};
+  });
+}
+Receiver.prototype.at=function(i){ return this.ring[i&MASK]; };
+Receiver.prototype.recalc=function(D,d){
+  var P=0,R1=0,R2=0, r=D.r; for(var i=0;i<2*L;i++){ var a=r[(d+i)&DMASK], c=r[(d+L+i)&DMASK]; P+=a*c; R1+=a*a; R2+=c*c; }
+  D.P=P; D.R1=R1; D.R2=R2; D.since=0;
+};
+Receiver.prototype.push=function(x){
+  var thr=0.07, nd=this.det.length;
+  for(var n=0;n<x.length;n++){
+    var v=x[n], idx=this.N; this.ring[idx&MASK]=v; this.N++;
+    for(var k=0;k<nd;k++){
+      var D=this.det[k], y=bq(D.f[3],bq(D.f[2],bq(D.f[1],bq(D.f[0],v))));
+      D.r[idx&DMASK]=y;
+      if(this.N<3*L+1) continue;
+      var d=this.N-3*L;
+      if(this.N===3*L+1 || ++D.since>=16384){ this.recalc(D,d); }
+      else {
+        var r=D.r, a0=r[(d-1)&DMASK], a1=r[(d+L-1)&DMASK], a2=r[(d+2*L-1)&DMASK], a3=r[(d+3*L-1)&DMASK];
+        D.P+=a2*a3-a0*a1; D.R1+=a2*a2-a0*a0; D.R2+=a3*a3-a1*a1;
+      }
+      var m=(D.P>0 && D.R2>L*2e-10 && D.R1>L*2e-10) ? D.P*D.P/(D.R1*D.R2) : 0;
+      if(m>=thr){
+        if(!D.inRun){ D.inRun=true; D.runStart=d; }
+        D.runEnd=d;
+      } else if(D.inRun){
+        D.inRun=false;
+        var len=D.runEnd-D.runStart;
+        // Mitte des Plateaus ≈ Rahmenbeginn + CP/2; ein Dauerton ergibt ein endloses Plateau und wird ignoriert
+        var tg=Math.round((D.runStart+D.runEnd)/2+CP/2);
+        if(len>=CP/6 && len<=5*L && tg>this.busyUntil) this.addCand(tg, D.b);
+      }
+    }
+  }
+  this.work();
+};
+Receiver.prototype.addCand=function(t,band){
+  for(var i=0;i<this.cands.length;i++) if(this.cands[i].bandHint===band && Math.abs(this.cands[i].tg-t)<CP/2) return;
+  if(this.cands.length>24) return;               // Schutz vor Überlast bei Dauerstörung
+  this.cands.push({tg:t, st:'sync', bandHint:band}); this.stats.det++;
+};
+Receiver.prototype.spectrum=function(start){
+  var re=this.re, im=this.im;
+  for(var n=0;n<L;n++){ re[n]=this.at(start+n); im[n]=0; }
+  fft(re,im,false);
+};
+Receiver.prototype.normScore=function(b,p){
+  var re=this.re, im=this.im, nb=b.nb, k1=b.k1, off=p*nb, num=0, den=0;
+  for(var s=0;s<b.nsb;s++){
+    var sr=0, si=0, er=0, i0=s*SB, i1=Math.min(nb,i0+SB);
+    for(var i=i0;i<i1;i++){ var r=re[k1+i], q=im[k1+i], c=b.pc[off+i], d=b.ps[off+i]; sr+=r*c+q*d; si+=q*c-r*d; er+=r*r+q*q; }
+    num+=Math.sqrt(sr*sr+si*si); den+=Math.sqrt(er*b.sbE[s]);
+  }
+  return den>0?num/den:0;
+};
+Receiver.prototype.symScores=function(b, acc){
+  var re=this.re, im=this.im, nb=b.nb, k1=b.k1, pc=b.pc, ps=b.ps, nsb=b.nsb;
+  for(var p=0;p<M;p++){
+    var off=p*nb, tot=0;
+    for(var s=0;s<nsb;s++){
+      var sr=0, si=0, i0=s*SB, i1=Math.min(nb,i0+SB);
+      for(var i=i0;i<i1;i++){ var r=re[k1+i], q=im[k1+i], c=pc[off+i], d=ps[off+i]; sr+=r*c+q*d; si+=q*c-r*d; }
+      tot+=Math.sqrt(sr*sr+si*si);
+    }
+    acc[p]+=tot;
+  }
+};
+Receiver.prototype.decodeBytes=function(c, firstByte, count){
+  var b=BANDS[c.band], rep=c.slow?2:1, out=[], acc=new Float64Array(M), q=0;
+  for(var j=0;j<count;j++){
+    acc.fill(0);
+    for(var r=0;r<rep;r++){ this.spectrum(c.t0+3*L+((firstByte+j)*rep+r)*SYM+CP); this.symScores(b,acc); }
+    var best=0, bv=-1, second=-1;
+    for(var p=0;p<M;p++){ if(acc[p]>bv){ second=bv; bv=acc[p]; best=p; } else if(acc[p]>second) second=acc[p]; }
+    out.push(best); q+=second>0?bv/second:2;
+  }
+  c.q=(c.q||0)+q; c.qn=(c.qn||0)+count;
+  return out;
+};
+Receiver.prototype.work=function(){
+  var N=this.N, keep=[];
+  for(var ci=0;ci<this.cands.length;ci++){
+    var c=this.cands[ci], done=false;
+    if(c.dead) continue;
+    if(N-c.tg>RING-4*L){ continue; }               // zu alt
+    if(c.st==='sync' && N>=c.tg+CP+4*L){
+      // Feinsuche: Startzeitpunkt und Frequenzband bestimmen
+      var best={s:0}, bi, d, p;
+      for(d=-L/2; d<=L/2; d+=16){
+        this.spectrum(c.tg+d);
+        bi=c.bandHint; for(p=0;p<2;p++){ var s=this.normScore(BANDS[bi],M+p); if(s>best.s) best={s:s,d:d,b:bi,p:p}; }
+      }
+      if(best.s<0.36){ done=true; }
+      else {
+        var b=BANDS[best.b], fine=best;
+        for(d=best.d-14; d<=best.d+14; d+=2){ this.spectrum(c.tg+d); var s2=this.normScore(b,M+best.p); if(s2>fine.s) fine={s:s2,d:d,b:best.b,p:best.p}; }
+        this.spectrum(c.tg+fine.d+L); var sB=this.normScore(b,M+fine.p);
+        this.spectrum(c.tg+fine.d+2*L); var sC=this.normScore(b,M+fine.p);
+        var pre=(fine.s+sB+sC)/3;
+        // Vergleich mit beliebigen Datenmustern an derselben Stelle: echte Startmuster ragen deutlich heraus
+        this.spectrum(c.tg+fine.d); var base=0; for(var bp=0;bp<4;bp++) base+=this.normScore(b,bp*61)/4;
+        if(pre<0.37 || pre-base<0.1) done=true;
+        else { c.t0=c.tg+fine.d; c.band=fine.b; c.slow=fine.p===1; c.pre=pre; c.st='hdr'; }
+      }
+    }
+    if(!done && c.st==='hdr' && N>=c.t0+3*L+3*(c.slow?2:1)*SYM+L){
+      var h=rsDecode(this.decodeBytes(c,0,3),2);
+      if(!h || ((h[0]>>6)&1)!==(c.slow?1:0)){ done=true; this.stats.fail++; this.lastFail={st:'hdr',band:c.band,slow:c.slow,pre:+c.pre.toFixed(2)}; }
+      else { c.k=h[0]&63; c.n=c.k+2+nsymFor(c.k); c.st='data'; }
+    }
+    if(!done && c.st==='data' && N>=c.t0+3*L+(3+c.n)*(c.slow?2:1)*SYM+L){
+      var raw=this.decodeBytes(c,3,c.n), msg=rsDecode(raw, nsymFor(c.k));
+      done=true;
+      if(msg){
+        var body=msg.slice(0,c.k), crc=(msg[c.k]<<8)|msg[c.k+1];
+        if(crc16(body)===crc){
+          this.busyUntil=c.t0+3*L+(3+c.n)*(c.slow?2:1)*SYM;
+          this.stats.ok++;
+          var bu=this.busyUntil; keep=keep.filter(function(o){ return o.tg>bu; });
+          for(var cj=ci+1;cj<this.cands.length;cj++) if(this.cands[cj].tg<=bu) this.cands[cj].dead=true;
+          var corrected=0; for(var z=0;z<raw.length;z++) if(raw[z]!==(rsEncode(msg, nsymFor(c.k))[z])) corrected++;
+          try{ this.onFrame(new Uint8Array(body), {band:c.band, key:BANDS[c.band].key, slow:c.slow, pre:c.pre, margin:c.q/c.qn, corrected:corrected}); }catch(e){}
+        } else { this.stats.fail++; this.lastFail={st:'crc',band:c.band,slow:c.slow,pre:+c.pre.toFixed(2)}; }
+      } else { this.stats.fail++; this.lastFail={st:'rs',band:c.band,slow:c.slow,pre:+c.pre.toFixed(2),q:+(c.q/c.qn).toFixed(2)}; }
+    }
+    if(!done) keep.push(c);
+  }
+  this.cands=keep;
+};
+
+return {FS:FS, BANDS:BANDS, encodeFrame:encodeFrame, frameSeconds:frameSeconds, Receiver:Receiver,
+        _rs:{enc:rsEncode, dec:rsDecode}, _crc:crc16};
+})();
+if(typeof module!=='undefined') module.exports=Modem;
+</script>
 <script>
 (function(){
 "use strict";
@@ -847,19 +1176,27 @@ function conv(src,type){ const b=new ArrayBuffer(src.byteLength); new src.constr
 
 /* Klangprofile: wie übertragen wird und was im Hintergrund läuft */
 const MODES={
-  ultra:{label:'Unhörbar', desc:'Ultraschall um 17 kHz – für die meisten Erwachsenen nicht zu hören. Klappt nicht mit jedem Handy-Mikrofon; dann springt bei Bedarf die hörbare Übertragung ein.'},
-  soft:{label:'Leise', desc:'Hörbare, aber leise und weich ein- und ausgeblendete Töne. Funktioniert mit fast allen Handys, braucht ruhige Umgebung.'},
-  robust:{label:'Robust', desc:'Deutlich hörbare Töne in normaler Lautstärke. Am zuverlässigsten, auch wenn es etwas lauter am Tisch ist.'}
+  n1:{label:'Meer 0,4–2,4 kHz', short:'Meer tief', desc:'Die Daten stecken im Rauschen selbst: jede Nachricht klingt wie eine kurze, tiefe Welle. Gut hörbar, aber angenehm. Handy-Lautsprecher sind in den Tiefen schwächer.'},
+  n2:{label:'Rauschen 2,5–6,5 kHz', short:'Rauschen mittel', desc:'Helleres Rauschen, ähnlich wie Brandung oder Wind. Der Bereich, den Handy-Lautsprecher und -Mikrofone am besten können.'},
+  n3:{label:'Rauschen 9–13 kHz', short:'Hoch 9–13 kHz', desc:'Feines, hohes Zischen. Mit Mitte 50 hört man davon meist wenig bis nichts – Handys schaffen den Bereich aber noch gut.'},
+  n4:{label:'Rauschen 12–16 kHz', short:'Hoch 12–16 kHz', desc:'Noch höher, für die meisten Erwachsenen praktisch unhörbar. Funktioniert nicht mit jedem Handy-Mikrofon gleich gut.'},
+  ultra:{label:'Ultraschall 15–19 kHz', short:'Ultraschall', desc:'Pieptöne im Ultraschall (ältere Übertragungsart). Klappt nicht mit jedem Handy.'},
+  robust:{label:'Pieptöne 2–6 kHz', short:'Pieptöne', desc:'Deutlich hörbare Tonfolgen (ältere Übertragungsart).'}
 };
 const BGS={
   none:{label:'Stille'}, sea:{label:'Meer'}, rain:{label:'Regen'}, fire:{label:'Kamin'}
 };
 // Stufen: 0/1 Ultraschall, 2/3 hörbar, 4 Doppelton (sehr robust)
-const TIER_SEQ={ ultra:[0,0,1,2,3], ultraOnly:[0,0,1], soft:[2,2,3], robust:[2,2,3,4] };
-function loadPrefs(){ const p=lsGet(KEY_SPREF)||{}; return {mode:MODES[p.mode]?p.mode:'ultra', bg:BGS[p.bg]?p.bg:'sea', fallback:p.fallback!==false, bgVol:typeof p.bgVol==='number'?p.bgVol:0.5}; }
+// Stufen: 0/1 Ultraschall-Pieptöne, 2/3/4 hörbare Pieptöne, 5–12 Rausch-Übertragung (Band 1–4, jeweils normal/langsam)
+const PRIMARY={ n1:[5,5,6,6], n2:[7,7,8,8], n3:[9,9,10,10], n4:[11,11,12,12], ultra:[0,0,1], robust:[2,2,3,4] };
+const FALLBACK={ n1:[8], n2:[], n3:[8], n4:[10,8], ultra:[8], robust:[] };
+function isNoise(t){ return t>=5 && t<=12; }
+function tierName(t){ return isNoise(t) ? MODES['n'+(((t-5)>>1)+1)].short+((t-5)&1?' (langsam)':'') : t<=1 ? 'Ultraschall' : 'Pieptöne'; }
+function loadPrefs(){ const p=lsGet(KEY_SPREF)||{}; if(!p.v3){ p.mode='n3'; p.bg='none'; } return {v3:1, mode:MODES[p.mode]?p.mode:'n3', bg:BGS[p.bg]?p.bg:'none', fallback:p.fallback!==false, bgVol:typeof p.bgVol==='number'?p.bgVol:0.5}; }
 let prefs=loadPrefs();
 function savePrefs(){ lsSet(KEY_SPREF, prefs); }
-function tierSeq(){ return prefs.mode==='ultra' ? (prefs.fallback?TIER_SEQ.ultra:TIER_SEQ.ultraOnly) : TIER_SEQ[prefs.mode]; }
+function tierSeq(){ return PRIMARY[prefs.mode].concat(prefs.fallback?FALLBACK[prefs.mode]:[]); }
+function isFallback(t){ return !PRIMARY[prefs.mode].includes(t); }
 function seqAt(seq, i){ if(i<seq.length) return seq[i]; const k=seq.length>=2?2:1; return seq[seq.length-k+((i-seq.length)%k)]; }
 
 const snd={ctx:null, gg:null, tx:null, txRate:0, rx:null, stream:null, src:null, node:null, sink:null,
@@ -880,6 +1217,9 @@ async function sndInit(){
     try{ snd.gg.disableLog(); }catch(e){}
     const pr=snd.gg.getDefaultParameters(); pr.sampleRateInp=48000; pr.sampleRateOut=48000;
     snd.rx=snd.gg.init(pr);
+  }
+  if(!snd.mrx){
+    snd.mrx=new Modem.Receiver((bytes,info)=>{ let t=''; try{ t=new TextDecoder().decode(bytes); }catch(e){} if(t) setTimeout(()=>onText(t,info),0); });
   }
   if(snd.tx===null || snd.txRate!==snd.ctx.sampleRate){
     if(snd.tx!==null){ try{ snd.gg.free(snd.tx); }catch(e){} }     // ggwave erlaubt nur wenige Instanzen
@@ -1012,6 +1352,7 @@ function onAudio(e){
   snd.floor = rms<snd.floor ? snd.floor*0.8+rms*0.2 : snd.floor*0.998+rms*0.002;
   if(rms > Math.max(0.004, snd.floor*3)) snd.lastLoud=performance.now();
   const y=resample48(x, snd.ctx.sampleRate);
+  try{ snd.mrx && snd.mrx.push(y); }catch(err){}
   const p=new Float32Array(snd.pend.length+y.length); p.set(snd.pend); p.set(y, snd.pend.length);
   let o=0;
   while(p.length-o>=1024){
@@ -1037,16 +1378,33 @@ function volOf(tier){
   if(prefs.mode==='ultra') return 18+boost;            // Notfall-Wiederholung, unter dem Hintergrund versteckt
   return 32+boost;
 }
+function resampleOut(x, from, to){
+  const ratio=to/from, n=Math.floor(x.length*ratio), y=new Float32Array(n), fc=Math.min(1,ratio);
+  for(let i=0;i<n;i++){ const t=i/ratio, c=Math.floor(t); let s=0;
+    for(let j=c-LZ_A+1;j<=c+LZ_A;j++){ if(j>=0 && j<x.length) s+=x[j]*fc*lanczos((t-j)*fc); } y[i]=s; }
+  return y;
+}
 function sndPlay(text, tier){
   return new Promise(res=>{
     if(!snd.ready || !snd.ctx){ res(); return; }
     let finished=false;
     const done=()=>{ if(finished) return; finished=true; snd.busy=false; linkUI(); res(); };
     try{
-      const w=conv(snd.gg.encode(snd.tx, text, protoOf(tier), volOf(tier)), Float32Array);
       const sr=snd.ctx.sampleRate;
+      let w;
+      if(isNoise(tier)){
+        // Rausch-Übertragung: Welle in 48 kHz erzeugen, bei Bedarf auf die Geräte-Rate umrechnen
+        const band=(tier-5)>>1, slow=((tier-5)&1)===1;
+        let w48=Modem.encodeFrame(new TextEncoder().encode(text), band, slow);
+        if(sr!==48000) w48=resampleOut(w48, 48000, sr);
+        const gain=[0.75,0.55,0.9,0.95][band]*(prefs.noiseVol!=null?prefs.noiseVol:1);
+        for(let i=0;i<w48.length;i++) w48[i]*=gain;
+        w=w48;
+      } else {
+        w=conv(snd.gg.encode(snd.tx, text, protoOf(tier), volOf(tier)), Float32Array);
       const fade=Math.min(Math.floor(sr*(tier<=1?0.03:0.02)), Math.floor(w.length/4));   // weich ein-/ausblenden, keine Klicks
       for(let i=0;i<fade;i++){ const g=0.5-0.5*Math.cos(Math.PI*i/fade); w[i]*=g; w[w.length-1-i]*=g; }
+      }
       const buf=snd.ctx.createBuffer(1, w.length, sr);
       buf.getChannelData(0).set(w);
       const s=snd.ctx.createBufferSource(); s.buffer=buf; s.connect(snd.ctx.destination);
@@ -1071,7 +1429,7 @@ function dataTier(m){
   const seq=tierSeq();
   let i=(m.tries||1)-1;
   // Klappt Ultraschall zwischen diesen Handys gerade nicht, gleich hörbar senden (mit gelegentlichem Test)
-  if(prefs.mode==='ultra' && prefs.fallback && link && link.loud>=2 && m.seq%5!==0) i+=3;
+  if(prefs.fallback && FALLBACK[prefs.mode].length && link && link.loud>=2 && m.seq%5!==0) i+=PRIMARY[prefs.mode].length;
   return seqAt(seq, i);
 }
 async function radioKick(){
@@ -1101,19 +1459,12 @@ async function radioKick(){
   } finally { radioRunning=false; }
 }
 // Bestätigungen: mindestens so robust wie nötig – was das andere Handy nachweislich nicht hört, wird übersprungen
-function ackTier(tier){
-  const seq=tierSeq(); let t=tier;
-  if(link && link.loud>=2 && seq.includes(2)) t=Math.max(t,2);
-  if(link && link.ackMin) t=Math.max(t, link.ackMin);
-  if(!seq.includes(t)){ const up=seq.filter(x=>x>=t); t=up.length?Math.min(...up):Math.max(...seq); }
-  return t;
+// Bestätigungen gehen auf demselben Weg zurück, auf dem die Nachricht kam; bei Wiederholungen robuster
+function escalate(t){
+  if(isNoise(t)) return ((t-5)&1) ? t : t+1;      // Rauschen: auf „langsam“ (doppelte Wiederholung)
+  return [1,3,3,4,4][t];
 }
-function escalate(tier){
-  const seq=tierSeq(); const i=seq.indexOf(tier);
-  if(i<0) return seq[0];
-  for(let k=i+1;k<seq.length;k++) if(seq[k]>tier) return seq[k];
-  return seq[seq.length-1]===tier && seq.length>1 ? seq[seq.length-2] : tier;
-}
+function ackTier(tier){ return link && (link.dupCount||0)>=2 ? escalate(tier) : tier; }
 
 /* Zuverlässige Zustellung */
 function encodeAct(a){
@@ -1162,10 +1513,11 @@ function pumpData(){
   link.inflight=link.outbox.shift(); link.inflight.tries=0; link.inflight.queued=false;
   enqueueData(link.inflight); linkUI();
 }
-function onText(t){
-  if(snd.testWant && t===snd.testWant){ snd.testWant=null; soundTestOk(); return; }
+function onText(t, info){
+  if(cmp.active && t[0]==='X'){ cmpGot(t, info); return; }
+  if(snd.testWant && t===snd.testWant){ snd.testWant=null; snd.testInfo=info||null; return; }
   if(!link || t.length<5) return;
-  const type=t[0], tier=parseInt(t[1],10);
+  const type=t[0], tier=parseInt(t[1],36);
   if(isNaN(tier)) return;
   if(type==='H'){
     if(link.role==='join' && !link.started && t.length>=12 && t[4]==='A') guestFoundHost(t.slice(2,4), t.slice(5,11), t.slice(11));
@@ -1179,7 +1531,7 @@ function onText(t){
     if(link.inflight && link.inflight.seq===seq){
       clearTimeout(linkTimer);
       const i=txq.findIndex(j=>j.msg===link.inflight); if(i>=0) txq.splice(i,1);
-      link.loud = (link.inflight.lastTier>=2 && prefs.mode==='ultra') ? (link.loud||0)+1 : 0;
+      link.loud = isFallback(link.inflight.lastTier) ? (link.loud||0)+1 : 0;
       link.inflight=null; linkSave(); pumpData(); linkUI();
       if(S) $('#msg').innerHTML=message();
     }
@@ -1199,15 +1551,13 @@ function onText(t){
         if(!apply(peer,a) && a.t!=='next' && a.t!=='again') ok=false;
       }
       link.lastIn=seq; link.dupCount=0;
-      if(++link.cleanIn>=10){ link.cleanIn=0; link.ackMin=0; }
       const checkable = seen===link.seqOut && link.batch.length===0;
       linkSave();
       enqueueCtl(ackText, ackTier(tier));        // Antwort im „Kanal“, den das andere Handy sicher hört
       if(!ok || (checkable && ck!==chk())) onDesync();
       render();
     } else if(((link.lastIn-seq+SEQMOD)%SEQMOD) < 600){
-      link.dupCount=(link.dupCount||0)+1; link.cleanIn=0;
-      if(link.dupCount>=2) link.ackMin=Math.max(link.ackMin||0, escalate(ackTier(tier)));
+      link.dupCount=(link.dupCount||0)+1;
       enqueueCtl(ackText, ackTier(tier));
     }
   }
@@ -1231,9 +1581,9 @@ function soundSettings(back){
   const seg=(act,cur,items)=>`<div class="seg">${Object.keys(items).map(k=>`<button class="${k===cur?'on':''}" data-act="${act}" data-v="${k}" data-back="${back}">${items[k].label}</button>`).join('')}</div>`;
   openSheet(`<h2>Klang</h2>
     <label>Übertragung</label>
-    ${seg('setMode', prefs.mode, MODES)}
+    ${Object.keys(MODES).map(k=>`<button class="btn ${k===prefs.mode?'':'sec'}" style="margin-top:6px;text-align:left" data-act="setMode" data-v="${k}" data-back="${back}">${k===prefs.mode?'✓ ':''}${MODES[k].label}</button>`).join('')}
     <p>${MODES[prefs.mode].desc}</p>
-    ${prefs.mode==='ultra'?`<button class="btn sec" data-act="toggleFb" data-back="${back}">${prefs.fallback?'✓ ':''}Bei Problemen hörbar wiederholen</button>`:''}
+    ${FALLBACK[prefs.mode].length?`<button class="btn sec" data-act="toggleFb" data-back="${back}">${prefs.fallback?'✓ ':''}Bei Problemen auf „${tierName(FALLBACK[prefs.mode][0])}“ ausweichen</button>`:''}
     <label>Hintergrund</label>
     ${seg('setBg', prefs.bg, BGS)}
     ${prefs.bg!=='none'?`<label for="bgv">Lautstärke Hintergrund</label><input id="bgv" type="range" min="0" max="1" step="0.05" value="${prefs.bgVol}" style="padding:0">`:''}
@@ -1269,7 +1619,8 @@ function soundMenu(){
     <button class="btn" data-act="soundJoin">Beitreten</button>
     ${canResume?`<button class="btn sec" data-act="soundResume">Ton-Spiel fortsetzen (Runde ${saved.S.round})</button>`:''}
     <button class="btn sec" data-act="soundSettings" data-back="soundMenu">Klang einstellen</button>
-    <button class="btn sec" data-act="soundTest">Ton testen</button>
+    <button class="btn sec" data-act="compare">Vergleichstest mit zwei Handys</button>
+    <button class="btn sec" data-act="soundTest">Ton testen (ein Handy)</button>
     <button class="btn sec" data-act="home">Zurück</button>`, 'start');
 }
 function soundPairSheet(title, text){
@@ -1302,7 +1653,8 @@ async function soundHost(){
 }
 function beaconTier(){
   // Beim Suchen abwechselnd unhörbar und (bei erlaubter Ausweichlösung) hörbar, damit sich auch „taube“ Handys finden
-  const seq = prefs.mode==='ultra' ? (prefs.fallback?[0,0,2]:[0,1]) : tierSeq();
+  const P=PRIMARY[prefs.mode], F=prefs.fallback?FALLBACK[prefs.mode]:[];
+  const seq = F.length ? [P[0],P[0],F[0]] : [P[0],P[0],P[P.length-1]];
   return seq[(beaconCount++)%seq.length];
 }
 function hostBeacon(){
@@ -1387,7 +1739,7 @@ function linkUI(){
   p.style.display='block';
   let icon='👂', warn=false, label='Hört zu';
   if(!snd.ready){ icon='🔇'; warn=true; label='Ton aus'; }
-  else if(snd.busy){ icon=prefs.bg==='sea'?'🌊':prefs.bg==='rain'?'🌧️':prefs.bg==='fire'?'🔥':'📡'; label='Sendet'; }
+  else if(snd.busy){ icon=(prefs.mode==='n1'||prefs.mode==='n2')?'🌊':'📡'; label='Sendet'; }
   else if(link && link.inflight){ const tr=link.inflight.tries||0; icon=tr>=5?'⚠️':'⏳'; warn=tr>=5; label='Wartet auf Bestätigung'; }
   p.textContent=icon; p.classList.toggle('warn',warn); p.setAttribute('aria-label','Ton-Verbindung: '+label);
 }
@@ -1395,7 +1747,7 @@ function linkSheet(){
   if(mode.kind!=='sound') return;
   const tr=link && link.inflight ? (link.inflight.tries||0) : 0;
   const state = !snd.ready ? 'Ton ist aus.' : link && link.inflight ? `Ein Zug wartet auf Bestätigung (Versuch ${tr}).` : 'Alles übertragen.';
-  const loudNote = prefs.mode==='ultra' && link && link.loud>=2 ? '<p>Ultraschall kommt zwischen euren Handys gerade schlecht an – es wird hörbar übertragen.</p>' : '';
+  const loudNote = link && link.loud>=2 && FALLBACK[prefs.mode].length ? `<p>„${MODES[prefs.mode].short}“ kommt zwischen euren Handys gerade schlecht an – es wird über „${tierName(FALLBACK[prefs.mode][0])}“ übertragen.</p>` : '';
   openSheet(`<h2>Ton-Verbindung</h2>
     <p class="lead">${state}</p>${loudNote}
     <div class="meter" aria-hidden="true"><i id="meter"></i></div>
@@ -1405,30 +1757,78 @@ function linkSheet(){
     <button class="btn sec" data-act="soundRestart">Ton neu starten</button>
     <button class="btn sec" data-act="solo">Auf diesem Handy weiterspielen</button>`,'menu');
 }
+const CMP_LIST=[['n1',5],['n2',7],['n3',9],['n4',11],['ultra',0],['robust',2]];
 async function soundTest(){
   readName('');
   openSheet(`<h2>Ton testen</h2><p id="pst">Starte …</p><div class="meter" aria-hidden="true"><i id="meter"></i></div>
-    <p>Das Handy sendet und versucht, sich selbst zu hören – erst unhörbar, dann hörbar.</p>
+    <div id="tres"></div>
+    <p>Das Handy sendet nacheinander jede Übertragungsart und versucht, sich selbst zu hören. Für den echten Vergleich zwischen zwei Handys nimm den Vergleichstest.</p>
     <button class="btn sec" data-act="soundMenu">Zurück</button>`,'pair');
   try{ await sndInit(); }catch(e){ return micError(e); }
-  const results=[];
-  for(const [tier,name] of [[0,'Unhörbar'],[2,'Hörbar']]){
-    snd.testWant='T'+tier+randId(4);
-    pstatus(`Teste „${name}“ …`);
-    const want=snd.testWant;
+  const rows=[];
+  for(const [key,tier] of CMP_LIST){
+    if(sheetKind!=='pair') return;
+    const want='T'+tier.toString(36)+randId(4);
+    snd.testWant=want; snd.testInfo=null;
+    pstatus(`Teste „${MODES[key].label}“ …`);
     await sndPlay(want, tier);
-    await sleep(1600);
-    results.push([name, snd.testWant!==want || snd.testWant===null]);
-    snd.testWant=null;
+    await sleep(isNoise(tier)?1800:1600);
+    const ok=snd.testWant===null; snd.testWant=null;
+    rows.push(`<tr><td>${MODES[key].label}</td><td>${ok?'✓'+(snd.testInfo?' '+Math.round(snd.testInfo.pre*100)+' %':''):'–'}</td></tr>`);
+    const el=$('#tres'); if(el) el.innerHTML='<table>'+rows.join('')+'</table>';
   }
-  const [u,a]=results.map(r=>r[1]);
-  let msg;
-  if(u && a) msg='Beides funktioniert auf diesem Handy. 👍 „Unhörbar“ ist eine gute Wahl.';
-  else if(a) msg='Hörbar klappt, Ultraschall nicht. Wähle unter „Klang“ besser „Leise“ oder „Robust“.';
-  else if(u) msg='Ultraschall klappt, hörbar nicht – ungewöhnlich, aber „Unhörbar“ passt.';
-  else msg='Das Handy hat sich nicht gehört. Lautstärke hoch und nochmal versuchen. Manche Handys hören sich selbst schlecht – mit zwei Handys kann es trotzdem klappen.';
-  pstatus(msg, u||a?'':'warn');
-  if(mode.kind!=='sound'){ clearTimeout(previewTimer); previewTimer=setTimeout(()=>{ if(mode.kind!=='sound' && sheetKind!=='pair') stopSound(); }, 4000); }
+  pstatus('Fertig. ✓ = das Handy hat sich selbst gehört (Prozent = Signalqualität). Mit zwei Handys kann es anders aussehen.');
+  if(mode.kind!=='sound'){ clearTimeout(previewTimer); previewTimer=setTimeout(()=>{ if(mode.kind!=='sound' && sheetKind!=='pair' && !cmp.active) stopSound(); }, 4000); }
+}
+/* Vergleichstest mit zwei Handys: eines sendet jede Art dreimal, das andere zählt mit */
+const cmp={active:false, role:null, res:{}};
+function compareSheet(){
+  cmp.active=false;
+  openSheet(`<h2>Vergleichstest</h2>
+    <p class="lead">Legt die Handys in die spätere Spielposition. Ein Handy sendet, das andere zeigt, was ankommt.</p>
+    <p>Jede Übertragungsart wird dreimal gesendet. Am Empfänger seht ihr, wie oft sie ankam und wie gut. So findet ihr heraus, was mit euren Handys am besten klappt – und was ihr kaum hört.</p>
+    <button class="btn" data-act="cmpRecv">Dieses Handy empfängt</button>
+    <button class="btn" data-act="cmpSend">Dieses Handy sendet</button>
+    <button class="btn sec" data-act="soundMenu">Zurück</button>`,'pair');
+}
+function cmpTable(){
+  return '<table><tr><th>Art</th><th>Ankunft</th><th>Qualität</th></tr>'+CMP_LIST.map(([key,tier])=>{
+    const r=cmp.res[tier]||{n:0,q:[]};
+    const q=r.q.length?Math.round(r.q.reduce((a,b)=>a+b,0)/r.q.length*100)+' %':'–';
+    return `<tr><td>${MODES[key].label}</td><td>${r.n}/3</td><td>${isNoise(tier)?q:(r.n?'✓':'–')}</td></tr>`;
+  }).join('')+'</table>';
+}
+async function cmpRecv(){
+  try{ await sndInit(); }catch(e){ return micError(e); }
+  cmp.active=true; cmp.role='recv'; cmp.res={};
+  openSheet(`<h2>Empfangen</h2><p id="pst">Ich höre zu … Jetzt auf dem anderen Handy „Dieses Handy sendet“ tippen.</p>
+    <div class="meter" aria-hidden="true"><i id="meter"></i></div><div id="cres">${cmpTable()}</div>
+    <p>Qualität: ab etwa 70 % sehr sicher, unter 50 % wackelig.</p>
+    <button class="btn sec" data-act="cmpEnd">Fertig</button>`,'pair');
+}
+function cmpGot(t, info){
+  if(cmp.role!=='recv') return;
+  const tier=parseInt(t[1],36), id=t.slice(2);
+  const r=cmp.res[tier]||(cmp.res[tier]={n:0,q:[],ids:{}});
+  if(r.ids[id]) return; r.ids[id]=1; r.n=Math.min(3,r.n+1);
+  if(info && info.pre) r.q.push(info.pre);
+  const el=$('#cres'); if(el) el.innerHTML=cmpTable();
+  pstatus(`Empfangen: ${tierName(tier)}`);
+}
+async function cmpSend(){
+  try{ await sndInit(); }catch(e){ return micError(e); }
+  cmp.active=true; cmp.role='send';
+  openSheet(`<h2>Senden</h2><p id="pst">Starte …</p><p>Das dauert etwa eine Minute. Das andere Handy muss vorher „Dieses Handy empfängt“ gewählt haben.</p>
+    <button class="btn sec" data-act="cmpEnd">Abbrechen</button>`,'pair');
+  for(const [key,tier] of CMP_LIST){
+    for(let i=1;i<=3;i++){
+      if(!cmp.active || cmp.role!=='send') return;
+      pstatus(`Sende „${MODES[key].label}“ (${i}/3) …`);
+      await sndPlay('X'+tier.toString(36)+randId(3)+i, tier);
+      await sleep(1500);
+    }
+  }
+  pstatus('Fertig gesendet. Das Ergebnis steht auf dem anderen Handy.');
 }
 function soundTestOk(){}
 
@@ -1438,11 +1838,15 @@ document.addEventListener('click', ev=>{
   if(a){
     const act=a.dataset.act;
     if(act==='localMenu') localMenu();
-    else if(act==='soundMenu'){ stopSound(); mode={kind:'local',me:null}; soundMenu(); }
+    else if(act==='soundMenu'){ cmp.active=false; cmp.role=null; stopSound(); mode={kind:'local',me:null}; soundMenu(); }
     else if(act==='soundHost') soundHost();
     else if(act==='soundJoin') soundJoin();
     else if(act==='soundResume') soundResume();
     else if(act==='soundTest') soundTest();
+    else if(act==='compare') compareSheet();
+    else if(act==='cmpRecv') cmpRecv();
+    else if(act==='cmpSend') cmpSend();
+    else if(act==='cmpEnd'){ cmp.active=false; cmp.role=null; stopSound(); soundMenu(); }
     else if(act==='soundSettings') soundSettings(a.dataset.back||'soundMenu');
     else if(act==='setMode'){ prefs.mode=a.dataset.v; savePrefs(); if(link) link.loud=0; soundSettings(a.dataset.back); }
     else if(act==='setBg'){ prefs.bg=a.dataset.v; savePrefs(); if(snd.ctx) applyBackground(true); soundSettings(a.dataset.back); }
@@ -1496,7 +1900,7 @@ window.addEventListener('resize', fit);
 window.addEventListener('orientationchange', ()=>setTimeout(fit,200));
 fit();
 startScreen();
-if(location.hash==='#selftest') window.__w12=()=>({S, link, mode, txq:txq.length});
+if(location.hash==='#selftest') window.__w12=()=>({S, link, mode, txq:txq.length, mrx:snd.mrx, snd});
 
 if('serviceWorker' in navigator && location.protocol==='https:'){
   window.addEventListener('load', ()=>{ navigator.serviceWorker.register('sw.js').catch(()=>{}); });
