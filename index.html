@@ -103,13 +103,14 @@ body.local .zone.top{transform:rotate(180deg)}
 @keyframes shake{20%{transform:translateX(-6px)}40%{transform:translateX(6px)}60%{transform:translateX(-4px)}80%{transform:translateX(4px)}}
 #menuBtn{position:absolute;right:10px;top:50%;transform:translateY(-50%);width:40px;height:40px;border-radius:50%;border:1px solid var(--line);background:var(--surface);color:var(--ink);font-size:18px;z-index:2}
 #netDot{position:absolute;left:14px;top:50%;transform:translateY(-50%);width:12px;height:12px;border-radius:50%;background:#4cb860;display:none;box-shadow:0 0 0 3px color-mix(in srgb,#4cb860 30%,transparent)}
-#sndBar{display:none;align-items:center;justify-content:center;gap:8px;font-size:13px;color:var(--muted);min-height:20px;padding:0 56px;text-align:center}
-body.sound #sndBar{display:flex}
-#sndBar.warn{color:var(--warn)}
-#sndBar.ok{color:#3f9a52}
-#sndMeter,.meter{display:inline-block;width:44px;height:6px;border-radius:3px;background:var(--line);overflow:hidden;flex:none}
-#sndMeter i,.meter i{display:block;height:100%;width:0;background:var(--accent);transition:width .1s}
-.meter{width:100%;height:10px;margin:10px 0}
+#linkPill{position:absolute;left:10px;top:50%;transform:translateY(-50%);width:40px;height:40px;border-radius:50%;border:1px solid var(--line);background:var(--surface);color:var(--ink);font-size:18px;z-index:2;display:none;padding:0}
+#linkPill.warn{border-color:var(--warn);box-shadow:0 0 0 3px color-mix(in srgb,var(--warn) 30%,transparent)}
+.seg{display:flex;gap:6px;flex-wrap:wrap;margin:4px 0}
+.seg button{flex:1 1 0;min-width:70px;padding:10px 6px;border-radius:12px;border:1px solid var(--line);background:transparent;color:var(--ink);font:inherit;font-size:15px;cursor:pointer}
+.seg button.on{background:var(--accent);color:var(--accentInk);border-color:var(--accent);font-weight:600}
+input[type=range]{width:100%;accent-color:var(--accent)}
+.meter{height:8px;border-radius:4px;background:var(--line);overflow:hidden;margin:10px 0}
+.meter i{display:block;height:100%;width:0;background:var(--accent);transition:width .1s linear}
 #resBtn{position:fixed;left:50%;transform:translateX(-50%);bottom:calc(14px + env(safe-area-inset-bottom,0px));display:none;z-index:15;padding:12px 22px;border-radius:999px;border:none;background:var(--accent);color:var(--accentInk);font-weight:600;font-size:16px;box-shadow:0 4px 14px rgba(0,0,0,.25)}
 
 #ov{position:fixed;inset:0;background:rgba(6,18,30,.55);display:none;align-items:center;justify-content:center;padding:16px;padding-top:calc(16px + env(safe-area-inset-top,0px));padding-bottom:calc(16px + env(safe-area-inset-bottom,0px));z-index:20}
@@ -148,6 +149,7 @@ tr.sum td{font-weight:700;border-bottom:none;color:var(--ink)}
   <section class="zone top" id="zT"><div class="grid" id="gT"></div><div class="label" id="lT"></div></section>
   <div id="centerWrap">
     <span id="netDot" title="Verbunden"></span>
+    <button id="linkPill" aria-label="Ton-Verbindung">👂</button>
     <div id="center">
       <div class="piles">
         <div class="pile"><button id="deck" class="card back" aria-label="Nachziehstapel"></button><span class="cap" id="deckCap">Stapel</span></div>
@@ -157,7 +159,6 @@ tr.sum td{font-weight:700;border-bottom:none;color:var(--ink)}
       <div id="msg"></div>
     </div>
     <button id="menuBtn" aria-label="Menü">☰</button>
-    <div id="sndBar"><span id="sndTxt"></span><span id="sndMeter"><i></i></span></div>
   </div>
   <section class="zone" id="zB"><div class="grid" id="gB"></div><div class="label" id="lB"></div></section>
 </div>
@@ -200,18 +201,23 @@ let prevSnap=null, lastPhase=null, sheetKind=null, resultTimer=null;
 const net={pc:null, dc:null, stream:null, scanning:false, connected:false, lost:false, resume:false, timer:null, wl:null, myName:''};
 
 /* ---------- Hilfen ---------- */
-function cryptoU32(){ try{ const a=new Uint32Array(1); crypto.getRandomValues(a); return a[0]>>>0; }catch(e){ return Math.floor(Math.random()*4294967296)>>>0; } }
-// Deterministischer Zufall (mulberry32) – beide Handys im Ton-Modus mischen damit identisch.
-function prng(){ let t=(S.rs=(S.rs+0x6D2B79F5)>>>0); t=Math.imul(t^(t>>>15), t|1); t^=t+Math.imul(t^(t>>>7), t|61); return ((t^(t>>>14))>>>0)/4294967296; }
-function rnd(n){ return Math.floor(prng()*n); }
-function shuffle(a){ for(let i=a.length-1;i>0;i--){ const j=rnd(i+1); [a[i],a[j]]=[a[j],a[i]]; } return a; }
-function newDeck(){
+function rnd(n){ try{ const a=new Uint32Array(1); crypto.getRandomValues(a); return a[0]%n; }catch(e){ return Math.floor(Math.random()*n); } }
+function shuffle(a, r){ r=r||rnd; for(let i=a.length-1;i>0;i--){ const j=r(i+1); [a[i],a[j]]=[a[j],a[i]]; } return a; }
+// Gemeinsamer Zufall für den Ton-Modus: beide Handys mischen aus demselben Startwert identisch.
+function seeded(str){
+  let h=1779033703^str.length;
+  for(let i=0;i<str.length;i++){ h=Math.imul(h^str.charCodeAt(i),3432918353); h=h<<13|h>>>19; }
+  let a=h>>>0;
+  return n=>{ a=a+0x6D2B79F5|0; let t=Math.imul(a^a>>>15,1|a); t=t+Math.imul(t^t>>>7,61|t)^t; return Math.floor(((t^t>>>14)>>>0)/4294967296*n); };
+}
+function rng(tag){ return S && S.seed ? seeded(S.seed+'|'+(S.gameNo||0)+'|'+S.round+'|'+tag) : rnd; }
+function newDeck(r){
   const d=[];
   for(let i=0;i<5;i++) d.push(-2);
   for(let i=0;i<10;i++) d.push(-1);
   for(let i=0;i<15;i++) d.push(0);
   for(let v=1;v<=12;v++) for(let i=0;i<10;i++) d.push(v);
-  return shuffle(d);
+  return shuffle(d, r);
 }
 function lsGet(k){ try{ const t=localStorage.getItem(k); return t?JSON.parse(t):null; }catch(e){ return null; } }
 function lsSet(k,v){ try{ localStorage.setItem(k, JSON.stringify(v)); }catch(e){} }
@@ -225,34 +231,38 @@ function cardHTML(v, up, extra, attrs){
 }
 function N(p){ return esc(S.names[p]); }
 async function wake(){ try{ if('wakeLock' in navigator && document.visibilityState==='visible') net.wl = await navigator.wakeLock.request('screen'); }catch(e){} }
-document.addEventListener('visibilitychange', ()=>{ if(document.visibilityState==='visible' && S) wake(); });
+document.addEventListener('visibilitychange', ()=>{
+  if(document.visibilityState!=='visible') return;
+  if(S) wake();
+  if(mode.kind==='sound' && link) soundWakeUp();
+});
 
 /* ---------- Spiellogik (läuft lokal oder beim Host) ---------- */
 function commit(){
   if(mode.kind==='local') lsSet(KEY_LOCAL, S);
   if(mode.kind==='host'){ lsSet(KEY_NET, S); sendState(); }
-  if(mode.kind==='sound') lsSet(KEY_SND, S);
+  if(mode.kind==='sound') linkSave();
   render();
 }
-function newGame(names, seed){
-  const keepLink = (S && S.link && mode.kind==='sound') ? S.link : null;
-  const rs = seed!==undefined ? seed : (keepLink ? S.rs : cryptoU32());
-  S={names, totals:[0,0], round:1, nextStarter:null, history:[], rs:rs>>>0, link:keepLink};
+function newGame(names, opts){
+  opts=opts||{};
+  S={names, totals:[0,0], round:1, nextStarter:null, history:[], seed:opts.seed||null, gameNo:opts.gameNo||0};
   lastPhase=null; prevSnap=null;
   deal();
 }
 function deal(){
-  const deck=newDeck();
+  S.reshuf=0;
+  const deck=newDeck(rng('deal'));
   S.grids=[0,1].map(()=>Array.from({length:12},()=>({v:deck.pop(), up:false, gone:false})));
   S.discard=[deck.pop()]; S.deck=deck;
   S.phase='setup'; S.flips=[0,0]; S.cur=null; S.sub=null; S.held=null; S.ender=null; S.result=null; S.note=null;
-  if(S.link){ S.link.sf=[]; S.link.tb=''; }
   commit();
 }
 function draw(){
   if(!S.deck.length){
     const top=S.discard.pop();
-    S.deck=shuffle(S.discard); S.discard=[top];
+    S.reshuf=(S.reshuf||0)+1;
+    S.deck=shuffle(S.discard, rng('rs'+S.reshuf)); S.discard=[top];
     S.note='Stapel neu gemischt.';
   }
   return S.deck.pop();
@@ -277,7 +287,7 @@ function apply(actor, a){
   if(a.t==='deck') return tapDeck(actor);
   if(a.t==='discard') return tapDiscard(actor);
   if(a.t==='next'){ if(S.phase!=='roundEnd') return false; S.round++; deal(); return true; }
-  if(a.t==='again'){ if(S.phase!=='over') return false; newGame(S.names); return true; }
+  if(a.t==='again'){ if(S.phase!=='over') return false; newGame(S.names, {seed:S.seed, gameNo:(S.gameNo||0)+1}); return true; }
   return false;
 }
 function tapCard(actor,p,i){
@@ -293,7 +303,7 @@ function tapCard(actor,p,i){
       else{
         const s=[0,1].map(q=>S.grids[q].filter(x=>x.up).reduce((a,x)=>a+x.v,0));
         if(s[0]!==s[1]){ st=s[0]>s[1]?0:1; why='hat die höhere Summe aufgedeckt'; }
-        else { st=rnd(2); why='wurde ausgelost (Gleichstand)'; }
+        else { st=rng('start')(2); why='wurde ausgelost (Gleichstand)'; }
       }
       S.phase='play'; S.cur=st; S.sub='choose';
       S.note=`${N(st)} beginnt – ${why}.`;
@@ -368,7 +378,7 @@ function endRound(){
 /* ---------- Eingaben ---------- */
 function localAct(a){
   if(!S) return;
-  if(mode.kind==='sound'){ soundAct(a); return; }
+  if(mode.kind==='sound'){ soundLocalAct(a); return; }
   if(mode.kind==='guest'){
     if(S.phase==='play' && S.cur!==mode.me && a.t!=='next' && a.t!=='again'){ nudge('msg'); return; }
     send({t:'act', a}); buzz(); return;
@@ -387,18 +397,16 @@ function snapOf(){
 function render(){
   if(!S) return;
   document.body.classList.toggle('local', mode.kind==='local');
-  document.body.classList.toggle('sound', mode.kind==='sound');
-  if(render.lastKind!==mode.kind){ render.lastKind=mode.kind; fit(); }
   const snap=snapOf(), anim=new Set();
   if(prevSnap) for(const k in snap){ if(snap[k]!==prevSnap[k]) anim.add(k); }
   prevSnap=snap;
 
-  const bottom = mode.kind==='guest' ? 1 : 0;
+  const bottom = mode.me===1 ? 1 : 0;
   renderZone(bottom,'B',anim);
   renderZone(1-bottom,'T',anim);
   renderCenter(anim);
   $('#netDot').style.display = ((mode.kind==='host'||mode.kind==='guest') && net.connected) ? 'block' : 'none';
-  sndUI();
+  linkUI();
 
   const ended = S.phase==='roundEnd' || S.phase==='over';
   if(lastPhase!==S.phase){
@@ -484,6 +492,7 @@ function message(){
   }
   else m='Runde vorbei.';
   if(S.note && (S.phase!=='play' || S.sub==='choose')) m=S.note+'<br>'+m;
+  if(mode.kind==='sound' && link && link.inflight && (link.inflight.tries||0)>=4) m+='<br><b>Das andere Handy antwortet nicht.</b> Rückt näher zusammen, Lautstärke hoch.';
   return m;
 }
 
@@ -533,14 +542,14 @@ function showResult(){
   openSheet(h,'result');
 }
 function startScreen(){
-  disconnect(); sndStop();
+  disconnect(); stopSound();
   mode={kind:'local', me:null}; S=null; prevSnap=null; lastPhase=null;
   document.body.classList.add('local');
   clearBoard();
   openSheet(`<h1>Wolke 12</h1>
     <p class="lead">Das Kartenduell nach Skyjo-Regeln für zwei – ganz ohne Internet.</p>
     <button class="btn" data-act="localMenu">Ein Handy, gegenüber sitzen</button>
-    <button class="btn" data-act="sndMenu">Zwei Handys über Ton</button>
+    <button class="btn" data-act="soundMenu">Zwei Handys über Ton</button>
     <button class="btn sec" data-act="netMenu">Zwei Handys über Hotspot</button>
     <button class="btn sec" data-act="rules">Regeln</button>
     ${!isStandalone()?`<p>Tipp: Füge die Seite zum Home-Bildschirm hinzu – dann startet sie auch ohne Netz zuverlässig.</p>`:''}`, 'start');
@@ -577,11 +586,11 @@ function netMenu(){
     <button class="btn sec" data-act="home">Zurück</button>`, 'start');
 }
 function menu(){
-  const netInfo = (mode.kind==='host'||mode.kind==='guest') ? `<p>${net.connected?'Verbunden mit dem anderen Handy.':'Nicht verbunden.'}</p>` : (mode.kind==='sound' ? `<p>Ton-Verbindung. ${S&&S.link&&S.link.outQ.length?'Ein Zug wartet noch auf Bestätigung.':'Alle Züge sind angekommen.'}</p>` : '');
+  const netInfo = (mode.kind==='host'||mode.kind==='guest') ? `<p>${net.connected?'Verbunden mit dem anderen Handy.':'Nicht verbunden.'}</p>` : '';
   openSheet(`<h2>Menü</h2>${netInfo}${S?scoreTable():''}
     <button class="btn" data-act="close">Zurück zum Spiel</button>
     ${(mode.kind==='host'||mode.kind==='guest') && !net.connected ? `<button class="btn sec" data-act="repair">Neu koppeln</button>`:''}
-    ${mode.kind==='sound' ? `<button class="btn sec" data-act="sndRetry">Letzten Zug nochmal senden</button><button class="btn sec" data-act="sndRestart">Ton neu starten</button>`:''}
+    ${mode.kind==='sound' ? `<button class="btn sec" data-act="linkInfo">Ton-Verbindung prüfen</button>`:''}
     <button class="btn sec" data-act="rules">Regeln</button>
     <button class="btn sec" data-act="home">${mode.kind==='local'?'Neues Spiel / Namen ändern':'Spiel verlassen'}</button>`, 'menu');
 }
@@ -805,7 +814,7 @@ function onMsg(m){
   }
 }
 function onLost(){
-  if(mode.kind==='local' || net.lost) return;
+  if((mode.kind!=='host' && mode.kind!=='guest') || net.lost) return;
   const wasConnected=net.connected;
   net.lost=true; net.connected=false;
   if(S) render();
@@ -824,369 +833,604 @@ function disconnect(){
   closePC(); stopCam();
 }
 
-/* ---------- Ton-Modus: Datenübertragung per Schall (ggwave) ----------
-   Rahmen (ASCII):
-     H<sid3><seed36>.<name>   Einladung (Eröffner ruft, bis jemand antwortet)
-     J<sid3><name>            Beitritt
-     M<sid3><who><seq><code>  Spielzug (wird bestätigt)
-     A<sid3><who><seq>        Bestätigung
-   Züge: S<i><j> Startkarten · D<i><h> Stapel+Tausch · X<i><h> Stapel+Ablegen+Aufdecken · T<i><h> Ablage+Tausch
-   <i> = Kartenindex hex, <h> = Prüfsumme des Spielstands (2 Zeichen). */
-const KEY_SND='wolke12-snd';
-const TS = window.__W12_TIMESCALE || 1;
-const SEQ='0123456789abcdefghijklmnopqrstuvwxyz';
-const snd={ctx:null, stream:null, src:null, proc:null, g:null, inst:null, instRate:0, acc:null, accN:0, chunk:1024, level:0, playEnd:0, ready:false, air:null, airSub:false};
-const lk={inflight:null, tries:0, timer:null, flash:'', flashT:0, warn:false, pairing:null, pairTimer:null, hostSid:'', hostSeed:0, calls:0, dupCount:0, lastDup:-1, meterRAF:0};
-function link0(sid, me){ return {sid, me, txSeq:0, rxExpect:0, outQ:[], sf:[], tb:''}; }
+/* ---------- Ton-Modus: Datenübertragung per Klang (ggwave) ---------- */
+const KEY_SOUND='wolke12-sound2', KEY_SPREF='wolke12-soundprefs';
+const B36='0123456789abcdefghijklmnopqrstuvwxyz';
+const SEQMOD=1296;
+const IS_IOS=/iPhone|iPad|iPod/.test(navigator.userAgent) || (navigator.platform==='MacIntel' && navigator.maxTouchPoints>1);
+function b36(n,len){ let s=''; for(let i=0;i<len;i++){ s=B36[n%36]+s; n=Math.floor(n/36); } return s; }
+function unb36(s){ let n=0; for(const ch of s){ const v=B36.indexOf(ch); if(v<0) return NaN; n=n*36+v; } return n; }
+function randId(len){ let s=''; for(let i=0;i<len;i++) s+=B36[rnd(36)]; return s; }
+function cleanName(s,def){ s=String(s||'').replace(/[\x00-\x1f]/g,'').trim().slice(0,10); return s||def; }
+function sleep(ms){ return new Promise(r=>setTimeout(r,ms)); }
+function conv(src,type){ const b=new ArrayBuffer(src.byteLength); new src.constructor(b).set(src); return new type(b); }
 
-async function sndStart(){
-  if(window.__W12_AIR){
-    snd.air=window.__W12_AIR;
-    if(!snd.airSub){ snd.air.subscribe(t=>onFrame(t)); snd.airSub=true; }
-    snd.ready=true; return;
+/* Klangprofile: wie übertragen wird und was im Hintergrund läuft */
+const MODES={
+  ultra:{label:'Unhörbar', desc:'Ultraschall um 17 kHz – für die meisten Erwachsenen nicht zu hören. Klappt nicht mit jedem Handy-Mikrofon; dann springt bei Bedarf die hörbare Übertragung ein.'},
+  soft:{label:'Leise', desc:'Hörbare, aber leise und weich ein- und ausgeblendete Töne. Funktioniert mit fast allen Handys, braucht ruhige Umgebung.'},
+  robust:{label:'Robust', desc:'Deutlich hörbare Töne in normaler Lautstärke. Am zuverlässigsten, auch wenn es etwas lauter am Tisch ist.'}
+};
+const BGS={
+  none:{label:'Stille'}, sea:{label:'Meer'}, rain:{label:'Regen'}, fire:{label:'Kamin'}
+};
+// Stufen: 0/1 Ultraschall, 2/3 hörbar, 4 Doppelton (sehr robust)
+const TIER_SEQ={ ultra:[0,0,1,2,3], ultraOnly:[0,0,1], soft:[2,2,3], robust:[2,2,3,4] };
+function loadPrefs(){ const p=lsGet(KEY_SPREF)||{}; return {mode:MODES[p.mode]?p.mode:'ultra', bg:BGS[p.bg]?p.bg:'sea', fallback:p.fallback!==false, bgVol:typeof p.bgVol==='number'?p.bgVol:0.5}; }
+let prefs=loadPrefs();
+function savePrefs(){ lsSet(KEY_SPREF, prefs); }
+function tierSeq(){ return prefs.mode==='ultra' ? (prefs.fallback?TIER_SEQ.ultra:TIER_SEQ.ultraOnly) : TIER_SEQ[prefs.mode]; }
+function seqAt(seq, i){ if(i<seq.length) return seq[i]; const k=seq.length>=2?2:1; return seq[seq.length-k+((i-seq.length)%k)]; }
+
+const snd={ctx:null, gg:null, tx:null, txRate:0, rx:null, stream:null, src:null, node:null, sink:null,
+  busy:false, ready:false, rsT:0, rsPrev:0, pend:new Float32Array(0), level:0, floor:0.003, lastLoud:0, testWant:null, gen:0,
+  hp:null, bgNode:null, bgGain:null, bgKind:null};
+let link=null;
+const txq=[];
+let radioRunning=false, linkTimer=null, idleTimer=null, beaconTimer=null, testTimer=null, meterTick=0, beaconCount=0, previewTimer=null;
+
+function withTimeout(p, ms){ return Promise.race([p, new Promise((_,rej)=>setTimeout(()=>rej(new Error('timeout')),ms))]); }
+async function sndInit(){
+  try{ if(navigator.audioSession) navigator.audioSession.type='play-and-record'; }catch(e){}
+  if(!snd.ctx){ const AC=window.AudioContext||window.webkitAudioContext; if(!AC) throw new Error('noaudio'); snd.ctx=new AC(); snd.bgKind=null; }
+  if(snd.ctx.state!=='running') await withTimeout(snd.ctx.resume(), 2500);
+  if(snd.ctx.state!=='running') throw new Error('suspended');
+  if(!snd.gg){
+    snd.gg=await ggwave_factory({print:()=>{}, printErr:()=>{}});
+    try{ snd.gg.disableLog(); }catch(e){}
+    const pr=snd.gg.getDefaultParameters(); pr.sampleRateInp=48000; pr.sampleRateOut=48000;
+    snd.rx=snd.gg.init(pr);
   }
-  const AC=window.AudioContext||window.webkitAudioContext;
-  if(!AC || !navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) throw new Error('Dieser Browser unterstützt keine Audio-Aufnahme.');
-  if(!snd.ctx || snd.ctx.state==='closed'){ try{ snd.ctx=new AC({sampleRate:48000}); }catch(e){ snd.ctx=new AC(); } }
-  try{ snd.ctx.resume(); }catch(e){}           // noch innerhalb der Nutzer-Geste aufrufen (iOS)
-  if(!snd.g){
-    snd.g = await ggwave_factory({print:()=>{}, printErr:()=>{}});
-    try{ snd.g.disableLog(); }catch(e){}
+  if(snd.tx===null || snd.txRate!==snd.ctx.sampleRate){
+    if(snd.tx!==null){ try{ snd.gg.free(snd.tx); }catch(e){} }     // ggwave erlaubt nur wenige Instanzen
+    const pt=snd.gg.getDefaultParameters(); pt.sampleRateInp=48000; pt.sampleRateOut=snd.ctx.sampleRate;
+    snd.tx=snd.gg.init(pt); snd.txRate=snd.ctx.sampleRate;
   }
-  if(snd.stream) snd.stream.getTracks().forEach(t=>{ t.onended=null; t.stop(); });
-  snd.stream = await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:false, noiseSuppression:false, autoGainControl:false}, video:false});
-  try{ await snd.ctx.resume(); }catch(e){}
-  const sr=snd.ctx.sampleRate;
-  if(!snd.inst || snd.instRate!==sr){
-    const g=snd.g, p=g.getDefaultParameters();
-    p.sampleRateInp=sr; p.sampleRateOut=sr;
-    p.sampleFormatInp=g.SampleFormat.GGWAVE_SAMPLE_FORMAT_F32;
-    p.sampleFormatOut=g.SampleFormat.GGWAVE_SAMPLE_FORMAT_F32;
-    p.operatingMode=g.GGWAVE_OPERATING_MODE_RX_AND_TX;
-    snd.inst=g.init(p); snd.instRate=sr;
+  const live=snd.stream && snd.stream.getAudioTracks().some(t=>t.readyState==='live' && t.enabled);
+  if(!live){
+    if(!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) throw new Error('nomic');
+    snd.stream=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:false, noiseSuppression:false, autoGainControl:false, channelCount:1}});
+    try{ snd.src && snd.src.disconnect(); snd.node && snd.node.disconnect(); }catch(e){}
+    snd.src=snd.ctx.createMediaStreamSource(snd.stream);
+    snd.node=snd.ctx.createScriptProcessor(2048,1,1);
+    snd.sink=snd.ctx.createGain(); snd.sink.gain.value=0;
+    snd.node.onaudioprocess=onAudio;
+    snd.src.connect(snd.node); snd.node.connect(snd.sink); snd.sink.connect(snd.ctx.destination);
+    snd.rsHist=null; snd.pend=new Float32Array(0); snd.hp=null;
+    snd.stream.getAudioTracks().forEach(t=>t.addEventListener('ended',()=>{ snd.ready=false; linkUI(); }));
   }
-  // ggwave erwartet Blöcke, die 1024 Samples bei 48 kHz entsprechen
-  snd.chunk=Math.round(1024*sr/48000); snd.acc=new Float32Array(snd.chunk); snd.accN=0;
-  try{ snd.src && snd.src.disconnect(); snd.proc && snd.proc.disconnect(); }catch(e){}
-  snd.src=snd.ctx.createMediaStreamSource(snd.stream);
-  snd.proc=snd.ctx.createScriptProcessor(2048,1,1);
-  snd.proc.onaudioprocess=onAudio;
-  snd.src.connect(snd.proc); snd.proc.connect(snd.ctx.destination);
-  snd.stream.getAudioTracks().forEach(t=>{ t.onended=()=>sndBroken(); });
-  snd.ready=true;
+  snd.ready=true; linkUI();
+  applyBackground();
 }
+snd.tx=null;
+function stopSound(){
+  snd.gen++;
+  clearTimeout(linkTimer); clearTimeout(idleTimer); clearTimeout(beaconTimer); clearTimeout(testTimer); clearTimeout(previewTimer);
+  txq.length=0; link=null; snd.testWant=null;
+  try{ snd.node && snd.node.disconnect(); snd.src && snd.src.disconnect(); }catch(e){}
+  if(snd.stream){ snd.stream.getTracks().forEach(t=>t.stop()); snd.stream=null; }
+  stopBackground();
+  if(snd.ctx){ try{ snd.ctx.close(); }catch(e){} snd.ctx=null; }
+  snd.ready=false; snd.busy=false;
+  const p=$('#linkPill'); if(p) p.style.display='none';
+}
+
+/* Hintergrundklang: tieffrequent, damit er die Datenbänder (ab ca. 1,8 kHz) nicht stört */
+function makeBgBuffer(kind){
+  const ctx=snd.ctx, sr=ctx.sampleRate, secs=12, len=sr*secs;
+  const buf=ctx.createBuffer(1,len,sr), d=buf.getChannelData(0);
+  let b=0, p0=0,p1=0,p2=0;
+  const R=Math.random;
+  if(kind==='sea'){
+    for(let i=0;i<len;i++){
+      b=(b+0.02*(R()*2-1))/1.02;
+      const t=i/sr;
+      const w1=Math.pow(0.5-0.5*Math.cos(2*Math.PI*t/6),2.2);
+      const w2=Math.pow(0.5-0.5*Math.cos(2*Math.PI*(t+1.7)/4),3);
+      d[i]=b*3.2*(0.22+0.6*w1+0.35*w2);
+    }
+  } else if(kind==='rain'){
+    for(let i=0;i<len;i++){
+      const w=R()*2-1; p0=0.997*p0+w*0.029591; p1=0.985*p1+w*0.032534; p2=0.95*p2+w*0.048056;
+      d[i]=(p0+p1+p2+w*0.05)*0.35;
+    }
+    for(let k=0;k<secs*14;k++){            // einzelne Tropfen
+      const at=Math.floor(R()*len), f=250+R()*700, a=0.05+R()*0.12, n=Math.floor(sr*0.03);
+      for(let j=0;j<n && at+j<len;j++) d[at+j]+=a*Math.sin(2*Math.PI*f*j/sr)*Math.exp(-j/(sr*0.006));
+    }
+  } else if(kind==='fire'){
+    for(let i=0;i<len;i++){ b=(b+0.02*(R()*2-1))/1.02; d[i]=b*2.2*(0.7+0.3*Math.sin(2*Math.PI*i/sr/3.1)); }
+    for(let k=0;k<secs*9;k++){             // Knistern
+      const at=Math.floor(R()*len), a=0.15+R()*0.4, n=Math.floor(sr*(0.004+R()*0.01));
+      for(let j=0;j<n && at+j<len;j++) d[at+j]+=a*(R()*2-1)*Math.exp(-j/(n*0.3));
+    }
+  }
+  const fade=Math.floor(sr*0.5);           // nahtlose Schleife
+  for(let i=0;i<fade;i++){ const g=i/fade; d[i]=d[i]*g+d[len-fade+i]*(1-g); }
+  return buf;
+}
+function stopBackground(){
+  try{ if(snd.bgNode){ snd.bgNode.stop(); snd.bgNode.disconnect(); } }catch(e){}
+  snd.bgNode=null; snd.bgGain=null; snd.bgKind=null;
+}
+function applyBackground(force){
+  if(!snd.ctx || snd.ctx.state!=='running') return;
+  const want=prefs.bg;
+  if(!force && snd.bgKind===want){ if(snd.bgGain) snd.bgGain.gain.value=prefs.bgVol*0.6; return; }
+  stopBackground();
+  if(want==='none') return;
+  const ctx=snd.ctx;
+  const src=ctx.createBufferSource(); src.buffer=makeBgBuffer(want); src.loop=true;
+  const f1=ctx.createBiquadFilter(); f1.type='lowpass'; f1.frequency.value=want==='fire'?700:1100; f1.Q.value=0.7;
+  const f2=ctx.createBiquadFilter(); f2.type='lowpass'; f2.frequency.value=1200; f2.Q.value=0.7;
+  const g=ctx.createGain(); g.gain.value=0;
+  src.connect(f1); f1.connect(f2); f2.connect(g); g.connect(ctx.destination);
+  src.start();
+  try{ g.gain.setValueAtTime(0, ctx.currentTime); g.gain.linearRampToValueAtTime(prefs.bgVol*0.6, ctx.currentTime+1.2); }catch(e){ g.gain.value=prefs.bgVol*0.6; }
+  snd.bgNode=src; snd.bgGain=g; snd.bgKind=want;
+}
+
+// Mikrofon-Samples sauber auf 48 kHz umrechnen (Lanczos, fortlaufend über Blockgrenzen).
+// Wichtig für Ultraschall: einfache lineare Umrechnung würde die hohen Töne bei 44,1-kHz-Geräten abschwächen.
+const LZ_A=8;
+function lanczos(x){ if(x===0) return 1; if(x<=-LZ_A || x>=LZ_A) return 0; const px=Math.PI*x; return LZ_A*Math.sin(px)*Math.sin(px/LZ_A)/(px*px); }
+function resample48(x, from){
+  if(from===48000) return x;
+  if(!snd.rsHist){ snd.rsHist=new Float32Array(0); snd.rsT=LZ_A; }
+  const step=from/48000, fc=Math.min(1, 48000/from);
+  const buf=new Float32Array(snd.rsHist.length+x.length); buf.set(snd.rsHist); buf.set(x, snd.rsHist.length);
+  // Gewichte einmal vorberechnen (512 Teilpositionen × 16 Stützstellen) – spart Rechenzeit auf schwachen Handys
+  if(!snd.lzTab || snd.lzFc!==fc){
+    const P=512, T=2*LZ_A, tab=new Float32Array(P*T);
+    for(let ph=0;ph<P;ph++){ const fr=ph/P; for(let q=0;q<T;q++){ const j=q-LZ_A+1; tab[ph*T+q]=fc*lanczos((fr-j)*fc); } }
+    snd.lzTab=tab; snd.lzFc=fc;
+  }
+  const tab=snd.lzTab, T=2*LZ_A;
+  const out=new Float32Array(Math.ceil(buf.length/step)+2); let k=0, t=snd.rsT;
+  while(t+LZ_A < buf.length){
+    const c=Math.floor(t), base=((t-c)*512|0)*T, j0=c-LZ_A+1; let s=0;
+    for(let q=0;q<T;q++) s+=buf[j0+q]*tab[base+q];
+    out[k++]=s; t+=step;
+  }
+  const keep=Math.max(0, Math.floor(t)-LZ_A);
+  snd.rsHist=buf.slice(keep); snd.rsT=t-keep;
+  return out.subarray(0,k);
+}
+// Hochpass für die „Ist gerade jemand am Senden?“-Erkennung (ignoriert das Hintergrundrauschen)
+function hpCoef(sr){ const f=1500, w=2*Math.PI*f/sr, c=Math.cos(w), al=Math.sin(w)/(2*0.707), a0=1+al; return {b0:(1+c)/2/a0, b1:-(1+c)/a0, b2:(1+c)/2/a0, a1:-2*c/a0, a2:(1-al)/a0, x1:0,x2:0,y1:0,y2:0}; }
 function onAudio(e){
-  const d=e.inputBuffer.getChannelData(0);
-  e.outputBuffer.getChannelData(0).fill(0);
-  let s=0; for(let i=0;i<d.length;i+=4) s+=d[i]*d[i];
-  snd.level=snd.level*0.6+Math.sqrt(s/(d.length/4))*0.4;
-  let off=0;
-  while(off<d.length){
-    const n=Math.min(d.length-off, snd.chunk-snd.accN);
-    snd.acc.set(d.subarray(off,off+n), snd.accN); snd.accN+=n; off+=n;
-    if(snd.accN===snd.chunk){
-      snd.accN=0;
-      try{
-        const r=snd.g.decode(snd.inst, new Int8Array(snd.acc.slice().buffer));
-        if(r && r.length){ const txt=new TextDecoder().decode(new Uint8Array(r)); setTimeout(()=>onFrame(txt),0); }
-      }catch(err){}
-    }
+  if(!snd.gg || !snd.ctx) return;
+  const x=e.inputBuffer.getChannelData(0);
+  if(!snd.hp) snd.hp=hpCoef(snd.ctx.sampleRate);
+  const h=snd.hp; let sum=0;
+  for(let i=0;i<x.length;i++){
+    const y=h.b0*x[i]+h.b1*h.x1+h.b2*h.x2-h.a1*h.y1-h.a2*h.y2;
+    h.x2=h.x1; h.x1=x[i]; h.y2=h.y1; h.y1=y; sum+=y*y;
   }
+  const rms=Math.sqrt(sum/x.length);
+  snd.level=snd.level*0.5+rms*0.5;
+  snd.floor = rms<snd.floor ? snd.floor*0.8+rms*0.2 : snd.floor*0.998+rms*0.002;
+  if(rms > Math.max(0.004, snd.floor*3)) snd.lastLoud=performance.now();
+  const y=resample48(x, snd.ctx.sampleRate);
+  const p=new Float32Array(snd.pend.length+y.length); p.set(snd.pend); p.set(y, snd.pend.length);
+  let o=0;
+  while(p.length-o>=1024){
+    let txt='';
+    try{
+      const r=snd.gg.decode(snd.rx, conv(p.subarray(o,o+1024), Int8Array));
+      if(r && r.length) txt=new TextDecoder().decode(r);
+    }catch(err){}
+    o+=1024;
+    if(txt){ const t=txt; setTimeout(()=>onText(t),0); }
+  }
+  snd.pend=p.slice(o);
+  if(++meterTick%3===0){ const m=$('#meter'); if(m) m.style.width=Math.min(100, Math.sqrt(snd.level)*400)+'%'; }
 }
-function sndPlay(text, proto, vol){
-  if(snd.air){ const ms=(700+text.length*70)*TS; snd.air.send(text, ms); return ms; }
-  if(!snd.ready || !snd.ctx) return 0;
-  const g=snd.g;
-  const raw=g.encode(snd.inst, text, g.ProtocolId['GGWAVE_PROTOCOL_'+proto], vol);
-  const f=new Float32Array(raw.buffer.slice(raw.byteOffset, raw.byteOffset+raw.byteLength));
-  const ctx=snd.ctx, b=ctx.createBuffer(1, f.length, ctx.sampleRate);
-  b.getChannelData(0).set(f);
-  const src=ctx.createBufferSource(); src.buffer=b; src.connect(ctx.destination);
-  const t0=Math.max(ctx.currentTime+0.05, snd.playEnd+0.2);
-  src.start(t0); snd.playEnd=t0+b.duration;
-  return (snd.playEnd-ctx.currentTime)*1000;
+function protoOf(tier){
+  const P=snd.gg.ProtocolId;
+  return [P.GGWAVE_PROTOCOL_ULTRASOUND_FAST, P.GGWAVE_PROTOCOL_ULTRASOUND_NORMAL, P.GGWAVE_PROTOCOL_AUDIBLE_FAST, P.GGWAVE_PROTOCOL_AUDIBLE_NORMAL, P.GGWAVE_PROTOCOL_DT_FAST][tier]||P.GGWAVE_PROTOCOL_AUDIBLE_FAST;
 }
-function sndStop(){
-  clearTimeout(lk.timer); clearTimeout(lk.pairTimer);
-  lk.inflight=null; lk.tries=0; lk.pairing=null; lk.warn=false;
-  cancelAnimationFrame(lk.meterRAF);
-  if(snd.stream){ snd.stream.getTracks().forEach(t=>{ t.onended=null; t.stop(); }); snd.stream=null; }
-  try{ snd.src && snd.src.disconnect(); snd.proc && snd.proc.disconnect(); }catch(e){}
-  snd.src=null; snd.proc=null;
-  if(!snd.air) snd.ready=false;
+function volOf(tier){
+  const boost=IS_IOS?12:0;
+  if(tier<=1) return 45+boost;                         // Ultraschall: kräftig, aber nicht übersteuert
+  if(prefs.mode==='soft') return 14+boost;
+  if(prefs.mode==='ultra') return 18+boost;            // Notfall-Wiederholung, unter dem Hintergrund versteckt
+  return 32+boost;
 }
-function sndBroken(){
-  if(mode.kind!=='sound') return;
-  snd.ready=false; clearTimeout(lk.timer); lk.inflight=null;
-  openSheet(`<h2>Ton unterbrochen</h2>
-    <p class="lead">Das Mikrofon wurde gestoppt – z. B. weil der Bildschirm aus war oder eine andere App lief. Der Spielstand ist gespeichert.</p>
-    <button class="btn" data-act="sndRestart">Ton wieder starten</button>
-    <button class="btn sec" data-act="home">Spiel verlassen</button>`,'sndbroken');
+function sndPlay(text, tier){
+  return new Promise(res=>{
+    if(!snd.ready || !snd.ctx){ res(); return; }
+    let finished=false;
+    const done=()=>{ if(finished) return; finished=true; snd.busy=false; linkUI(); res(); };
+    try{
+      const w=conv(snd.gg.encode(snd.tx, text, protoOf(tier), volOf(tier)), Float32Array);
+      const sr=snd.ctx.sampleRate;
+      const fade=Math.min(Math.floor(sr*(tier<=1?0.03:0.02)), Math.floor(w.length/4));   // weich ein-/ausblenden, keine Klicks
+      for(let i=0;i<fade;i++){ const g=0.5-0.5*Math.cos(Math.PI*i/fade); w[i]*=g; w[w.length-1-i]*=g; }
+      const buf=snd.ctx.createBuffer(1, w.length, sr);
+      buf.getChannelData(0).set(w);
+      const s=snd.ctx.createBufferSource(); s.buffer=buf; s.connect(snd.ctx.destination);
+      snd.busy=true; linkUI();
+      s.onended=done; s.start();
+      setTimeout(done, w.length/sr*1000+1500);
+    }catch(e){ done(); }
+  });
 }
-async function sndRestart(){
-  try{ await sndStart(); closeSheet(); meterLoop(); pump(); }
-  catch(e){ openSheet(`<h2>Mikrofon nicht verfügbar</h2><p class="lead">${esc(e.message||e)}</p><p>Erlaube den Mikrofonzugriff für diese Seite und versuche es erneut.</p><button class="btn" data-act="sndRestart">Nochmal versuchen</button><button class="btn sec" data-act="home">Spiel verlassen</button>`,'sndbroken'); }
+async function waitQuiet(){
+  const t0=performance.now();
+  while(performance.now()-snd.lastLoud<500 && performance.now()-t0<4000) await sleep(120);
 }
-document.addEventListener('visibilitychange', ()=>{
-  if(document.visibilityState!=='visible' || mode.kind!=='sound' || snd.air) return;
-  const live = snd.stream && snd.stream.getAudioTracks().some(t=>t.readyState==='live');
-  if(snd.ctx && snd.ctx.state!=='running'){ try{ snd.ctx.resume(); }catch(e){} }
-  setTimeout(()=>{ if(mode.kind==='sound' && (!live || !snd.ctx || snd.ctx.state!=='running')) sndBroken(); }, 600);
-});
-
-/* --- Prüfsumme, damit Abweichungen auffallen --- */
-function stateHash(){
-  const str=JSON.stringify([S.grids.map(g=>g.map(c=>c.gone?'g':(c.up?c.v:'x'+c.v))), S.discard, S.deck.length, S.totals, S.cur, S.phase]);
-  let h=2166136261;
-  for(let i=0;i<str.length;i++){ h^=str.charCodeAt(i); h=Math.imul(h,16777619); }
-  return ((h>>>0)%1296).toString(36).padStart(2,'0');
+function withTier(text, tier){ return text[0]+String(tier)+text.slice(2); }
+function enqueueCtl(text, tier){
+  const ex=txq.find(j=>j.text===text);
+  if(ex){ ex.tier=Math.max(ex.tier, tier); return; }
+  txq.unshift({text, tier}); radioKick();
 }
-
-/* --- Kopplung --- */
-function sndMenu(){
-  const name=lsGet(KEY_NAME)||'';
-  const saved=lsGet(KEY_SND);
-  const canResume=saved && saved.grids && saved.link && saved.phase!=='over';
-  openSheet(`<h2>Zwei Handys über Ton</h2>
-    <ol class="steps">
-      <li>Legt die Handys nebeneinander und dreht die <b>Lautstärke</b> hoch.</li>
-      <li>Einer tippt „Spiel eröffnen“, der andere „Beitreten“.</li>
-      <li>Jeder Zug wird als kurzes Piepsen übertragen. Kommt er nicht an, wird er automatisch wiederholt.</li>
-    </ol>
-    <p>Das Mikrofon wird gebraucht – bitte erlauben. Kein WLAN, kein Internet nötig.</p>
-    <label for="nm">Dein Name</label><input id="nm" maxlength="12" value="${esc(name)}" placeholder="z. B. Lena">
-    <button class="btn" data-act="sndHost">Spiel eröffnen</button>
-    <button class="btn" data-act="sndJoin">Beitreten</button>
-    ${canResume?`<button class="btn sec" data-act="sndResume">Gespeichertes Spiel fortsetzen (Runde ${saved.round})</button>`:''}
-    <button class="btn sec" data-act="home">Zurück</button>`,'start');
+function enqueueData(m){ if(m.queued) return; m.queued=true; txq.push({msg:m}); radioKick(); }
+function dataTier(m){
+  const seq=tierSeq();
+  let i=(m.tries||1)-1;
+  // Klappt Ultraschall zwischen diesen Handys gerade nicht, gleich hörbar senden (mit gelegentlichem Test)
+  if(prefs.mode==='ultra' && prefs.fallback && link && link.loud>=2 && m.seq%5!==0) i+=3;
+  return seqAt(seq, i);
 }
-function readName(fallback){
-  const nm=$('#nm');
-  if(nm){ net.myName=(nm.value.trim()||fallback).slice(0,12); lsSet(KEY_NAME, net.myName); }
-  if(!net.myName) net.myName=fallback;
-  return net.myName;
+async function radioKick(){
+  if(radioRunning) return;
+  radioRunning=true;
+  const gen=snd.gen;
+  try{
+    while(txq.length && snd.ready && gen===snd.gen){
+      await waitQuiet();
+      if(gen!==snd.gen || !txq.length) break;
+      const job=txq.shift();
+      if(job.msg){
+        const m=job.msg; m.queued=false;
+        if(!link || link.inflight!==m) continue;
+        m.tries=(m.tries||0)+1; m.lastTier=dataTier(m);
+        linkUI(); if(S) $('#msg').innerHTML=message();
+        await sndPlay(withTier(m.text, m.lastTier), m.lastTier);
+        if(gen===snd.gen && link && link.inflight===m){
+          clearTimeout(linkTimer);
+          const wait=3400+Math.random()*2400+(m.lastTier>=3?1200:0)+(m.tries>=5?2500:0);
+          linkTimer=setTimeout(()=>{ if(link && link.inflight===m) enqueueData(m); }, wait);
+        }
+      } else {
+        await sndPlay(withTier(job.text, job.tier), job.tier);
+      }
+    }
+  } finally { radioRunning=false; }
 }
-function pairSheetSnd(title, text){
-  openSheet(`<h2>${title}</h2>
-    <p class="lead" id="pst">${text}</p>
-    <div class="meter" aria-hidden="true"><i id="pmeter"></i></div>
-    <p>Der Balken zeigt, was das Mikrofon hört. Er sollte beim Piepsen des anderen Handys deutlich ausschlagen.</p>
-    <button class="btn sec" data-act="sndMenu">Abbrechen</button>`,'pair');
-  meterLoop();
+// Bestätigungen: mindestens so robust wie nötig – was das andere Handy nachweislich nicht hört, wird übersprungen
+function ackTier(tier){
+  const seq=tierSeq(); let t=tier;
+  if(link && link.loud>=2 && seq.includes(2)) t=Math.max(t,2);
+  if(link && link.ackMin) t=Math.max(t, link.ackMin);
+  if(!seq.includes(t)){ const up=seq.filter(x=>x>=t); t=up.length?Math.min(...up):Math.max(...seq); }
+  return t;
 }
-function meterLoop(){
-  cancelAnimationFrame(lk.meterRAF);
-  const tick=()=>{
-    const w=Math.min(100, Math.round(Math.sqrt(snd.level)*260))+'%';
-    const a=$('#pmeter'); if(a) a.style.width=w;
-    const b=$('#sndMeter i'); if(b) b.style.width=w;
-    if(lk.flash && Date.now()>lk.flashT){ lk.flash=''; sndUI(); }
-    lk.meterRAF=requestAnimationFrame(tick);
-  };
-  tick();
-}
-async function sndHost(){
-  const me=readName('Spieler 1');
-  sndStop(); disconnect();
-  mode={kind:'local', me:null};
-  lk.pairing='host'; lk.calls=0;
-  lk.hostSid=(cryptoU32()%46656).toString(36).padStart(3,'0');
-  lk.hostSeed=cryptoU32();
-  pairSheetSnd('Spiel eröffnen','Mikrofon wird gestartet …');
-  try{ await sndStart(); }catch(e){ lk.pairing=null; return pstatus('Das Mikrofon ließ sich nicht starten: '+esc(e.message||e)+'. Erlaube den Zugriff und versuche es erneut.','warn'); }
-  pstatus('Rufe das andere Handy … Dort jetzt „Beitreten“ tippen.');
-  const call=()=>{
-    if(lk.pairing!=='host') return;
-    lk.calls++;
-    const ms=sndPlay('H'+lk.hostSid+lk.hostSeed.toString(36)+'.'+me, lk.calls%3===0?'AUDIBLE_NORMAL':'AUDIBLE_FAST', lk.calls>4?85:65);
-    if(lk.calls>6) pstatus('Rufe weiter … Keine Antwort bisher. Handys näher zusammenlegen und Lautstärke hochdrehen.','warn');
-    lk.pairTimer=setTimeout(call, ms+(2300+Math.random()*1500)*TS);
-  };
-  call();
-}
-async function sndJoin(){
-  readName('Spieler 2');
-  sndStop(); disconnect();
-  mode={kind:'local', me:null};
-  lk.pairing='join';
-  pairSheetSnd('Beitreten','Mikrofon wird gestartet …');
-  try{ await sndStart(); }catch(e){ lk.pairing=null; return pstatus('Das Mikrofon ließ sich nicht starten: '+esc(e.message||e)+'. Erlaube den Zugriff und versuche es erneut.','warn'); }
-  pstatus('Höre zu … Auf dem anderen Handy jetzt „Spiel eröffnen“ tippen.');
-}
-async function sndResume(){
-  const saved=lsGet(KEY_SND);
-  if(!saved || !saved.link) return sndMenu();
-  disconnect(); sndStop();
-  S=saved; mode={kind:'sound', me:saved.link.me}; prevSnap=null; lastPhase=null;
-  closeSheet(); render();
-  await sndRestart();
-}
-function sendJ(){
-  const L=S.link;
-  setTimeout(()=>sndPlay('J'+L.sid+(net.myName||'Spieler 2'),'AUDIBLE_FAST',70), 300*TS);
+function escalate(tier){
+  const seq=tierSeq(); const i=seq.indexOf(tier);
+  if(i<0) return seq[0];
+  for(let k=i+1;k<seq.length;k++) if(seq[k]>tier) return seq[k];
+  return seq[seq.length-1]===tier && seq.length>1 ? seq[seq.length-2] : tier;
 }
 
-/* --- Empfang --- */
-function onFrame(t){
-  if(typeof t!=='string' || t.length<4) return;
-  const type=t[0];
+/* Zuverlässige Zustellung */
+function encodeAct(a){
+  if(a.t==='card') return a.i.toString(16);
+  return {deck:'d', discard:'x', next:'n', again:'g'}[a.t]||'';
+}
+function decodeAct(c,p){
+  if(/^[0-9ab]$/.test(c)) return {t:'card', p, i:parseInt(c,16)};
+  return {d:{t:'deck'}, x:{t:'discard'}, n:{t:'next'}, g:{t:'again'}}[c]||null;
+}
+function chk(){
+  let s=[S.phase,S.cur,S.sub,S.held,S.round,S.gameNo||0,S.totals.join('.'),S.deck.length,S.discard.join('.')].join('|');
+  for(const g of S.grids) for(const c of g) s+=c.gone?'g':c.up?c.v:'x';
+  let h=2166136261; for(let i=0;i<s.length;i++){ h^=s.charCodeAt(i); h=Math.imul(h,16777619); }
+  return b36((h>>>0)%SEQMOD,2);
+}
+function linkSave(){
+  if(!link) return;
+  const box=[];
+  if(link.inflight) box.push({seq:link.inflight.seq, text:link.inflight.text});
+  link.outbox.forEach(m=>box.push({seq:m.seq, text:m.text}));
+  lsSet(KEY_SOUND, {S, link:{role:link.role, gid:link.gid, me:link.me, seed:link.seed, peer:link.peer, myName:link.myName,
+    seqOut:link.seqOut, lastIn:link.lastIn, batch:link.batch, started:link.started, outbox:box, loud:link.loud||0}});
+}
+function soundLocalAct(a){
+  if(!link || !link.started){ nudge('msg'); return; }
+  const before=S.phase;
+  if(!apply(mode.me, a)){ nudge('msg'); return; }
+  buzz();
+  link.batch.push(encodeAct(a));
+  const myMove=(S.phase==='play' && S.cur===mode.me) || (S.phase==='setup' && S.flips[mode.me]<2);
+  if(!myMove || S.phase!==before || a.t==='next' || a.t==='again' || link.batch.length>=12) flush();
+  else { clearTimeout(idleTimer); idleTimer=setTimeout(flush, 7000); linkSave(); }
+}
+function flush(){
+  clearTimeout(idleTimer);
+  if(!link || !link.batch.length) return;
+  link.seqOut=(link.seqOut+1)%SEQMOD;
+  const text='M?'+link.gid+link.me+b36(link.seqOut,2)+b36(link.lastIn,2)+chk()+link.batch.join('');
+  link.batch=[];
+  link.outbox.push({seq:link.seqOut, text});
+  linkSave(); pumpData();
+}
+function pumpData(){
+  if(!link || link.inflight || !link.outbox.length) return;
+  link.inflight=link.outbox.shift(); link.inflight.tries=0; link.inflight.queued=false;
+  enqueueData(link.inflight); linkUI();
+}
+function onText(t){
+  if(snd.testWant && t===snd.testWant){ snd.testWant=null; soundTestOk(); return; }
+  if(!link || t.length<5) return;
+  const type=t[0], tier=parseInt(t[1],10);
+  if(isNaN(tier)) return;
   if(type==='H'){
-    const sid=t.slice(1,4), rest=t.slice(4), dot=rest.indexOf('.');
-    if(dot<1) return;
-    const seed=parseInt(rest.slice(0,dot),36);
-    if(!isFinite(seed)) return;
-    const hostName=(rest.slice(dot+1)||'Spieler 1').slice(0,12);
-    if(lk.pairing==='join'){
-      lk.pairing=null;
-      mode={kind:'sound', me:1};
-      S=null; prevSnap=null; lastPhase=null;
-      newGame([hostName, net.myName||'Spieler 2'], seed);
-      S.link=link0(sid,1); lsSet(KEY_SND,S);
-      sendJ(); closeSheet(); flash('Verbunden! Deckt jetzt je 2 Karten auf.'); render(); wake();
-    } else if(mode.kind==='sound' && S && S.link && S.link.sid===sid && S.link.me===1){
-      sendJ();   // Eröffner hat unser „J“ verpasst – nochmal antworten
-    }
+    if(link.role==='join' && !link.started && t.length>=12 && t[4]==='A') guestFoundHost(t.slice(2,4), t.slice(5,11), t.slice(11));
     return;
   }
-  if(type==='J'){
-    const sid=t.slice(1,4), guest=(t.slice(4)||'Spieler 2').slice(0,12);
-    if(lk.pairing==='host' && sid===lk.hostSid){
-      lk.pairing=null; clearTimeout(lk.pairTimer);
-      mode={kind:'sound', me:0};
-      S=null; prevSnap=null; lastPhase=null;
-      newGame([net.myName||'Spieler 1', guest], lk.hostSeed);
-      S.link=link0(sid,0); lsSet(KEY_SND,S);
-      closeSheet(); flash('Verbunden! Deckt jetzt je 2 Karten auf.'); render(); wake();
-      pump();
+  if(t.slice(2,4)!==link.gid || t[4]===link.me) return;      // fremdes Spiel oder eigenes Echo
+  if(type==='J' && link.role==='host'){ hostGotJoin(t.slice(5), tier); return; }
+  if(type==='S' && link.role==='join'){ guestStart(); return; }
+  if(type==='K'){
+    const seq=unb36(t.slice(5,7));
+    if(link.inflight && link.inflight.seq===seq){
+      clearTimeout(linkTimer);
+      const i=txq.findIndex(j=>j.msg===link.inflight); if(i>=0) txq.splice(i,1);
+      link.loud = (link.inflight.lastTier>=2 && prefs.mode==='ultra') ? (link.loud||0)+1 : 0;
+      link.inflight=null; linkSave(); pumpData(); linkUI();
+      if(S) $('#msg').innerHTML=message();
     }
-    return;
-  }
-  if(mode.kind!=='sound' || !S || !S.link) return;
-  const L=S.link;
-  if(t.slice(1,4)!==L.sid) return;
-  const who=t[4];
-  if(who!=='0' && who!=='1') return;
-  if(+who===L.me) return;                        // eigenes Echo
-  const seq=SEQ.indexOf(t[5]);
-  if(seq<0) return;
-  if(type==='A'){
-    if(lk.inflight && seq===lk.inflight.seq) ackReceived();
     return;
   }
   if(type==='M'){
-    const code=t.slice(6);
-    if(seq===L.rxExpect){
-      lk.dupCount=0;
-      const ok=applyRemote(code);
-      L.rxExpect=(L.rxExpect+1)%36;
-      lsSet(KEY_SND,S);
-      sendAck(seq, false);
+    if(link.role==='join' && !link.started) guestStart();
+    const seq=unb36(t.slice(5,7)), seen=unb36(t.slice(7,9)), ck=t.slice(9,11), acts=t.slice(11);
+    if(isNaN(seq) || isNaN(seen) || !S) return;
+    const ackText='K?'+link.gid+link.me+b36(seq,2);
+    if(seq===(link.lastIn+1)%SEQMOD){
+      const peer=link.me==='A'?1:0;
+      let ok=true;
+      for(const c of acts){
+        const a=decodeAct(c, peer);
+        if(!a){ ok=false; continue; }
+        if(!apply(peer,a) && a.t!=='next' && a.t!=='again') ok=false;
+      }
+      link.lastIn=seq; link.dupCount=0;
+      if(++link.cleanIn>=10){ link.cleanIn=0; link.ackMin=0; }
+      const checkable = seen===link.seqOut && link.batch.length===0;
+      linkSave();
+      enqueueCtl(ackText, ackTier(tier));        // Antwort im „Kanal“, den das andere Handy sicher hört
+      if(!ok || (checkable && ck!==chk())) onDesync();
       render();
-      if(!ok) desync();
-      else pump();
-    } else if(seq===(L.rxExpect+35)%36){
-      lk.dupCount = lk.lastDup===seq ? lk.dupCount+1 : 1; lk.lastDup=seq;
-      sendAck(seq, lk.dupCount>=2);              // Bestätigung ging wohl verloren
+    } else if(((link.lastIn-seq+SEQMOD)%SEQMOD) < 600){
+      link.dupCount=(link.dupCount||0)+1; link.cleanIn=0;
+      if(link.dupCount>=2) link.ackMin=Math.max(link.ackMin||0, escalate(ackTier(tier)));
+      enqueueCtl(ackText, ackTier(tier));
     }
   }
 }
-function sendAck(seq, slow){
-  const L=S.link;
-  setTimeout(()=>sndPlay('A'+L.sid+L.me+SEQ[seq], slow?'AUDIBLE_NORMAL':'AUDIBLE_FAST', slow?85:70), 250*TS);
-}
-function applyRemote(code){
-  const peer=1-S.link.me, k=code[0], hx=c=>parseInt(c,16);
-  if(k==='S'){
-    if(S.phase==='roundEnd'){ S.round++; deal(); }
-    else if(S.phase==='over'){ newGame(S.names); }
-    const a=hx(code[1]), b=hx(code[2]);
-    return apply(peer,{t:'card',p:peer,i:a}) && apply(peer,{t:'card',p:peer,i:b});
-  }
-  const i=hx(code[1]), h=code.slice(2,4);
-  let ok=false;
-  if(k==='D') ok=apply(peer,{t:'deck'}) && apply(peer,{t:'card',p:peer,i});
-  else if(k==='X') ok=apply(peer,{t:'deck'}) && apply(peer,{t:'discard'}) && apply(peer,{t:'card',p:peer,i});
-  else if(k==='T') ok=apply(peer,{t:'discard'}) && apply(peer,{t:'card',p:peer,i});
-  return ok && stateHash()===h;
-}
-function desync(){
+function onDesync(){
+  if(sheetKind==='desync') return;
   openSheet(`<h2>Spielstände weichen ab</h2>
-    <p class="lead">Die beiden Handys zeigen nicht mehr dasselbe Spiel. Das sollte nicht passieren – vermutlich wurde ein Spiel auf einem Handy neu gestartet.</p>
-    <button class="btn" data-act="close">Trotzdem weiterspielen</button>
-    <button class="btn sec" data-act="sndMenu">Neues Spiel koppeln</button>`,'desync');
+    <p class="lead">Die beiden Handys sind sich nach einer Störung nicht mehr ganz einig.</p>
+    <p>Am sichersten spielt ihr diese Partie auf einem Handy zu Ende – der Spielstand bleibt erhalten.</p>
+    <button class="btn" data-act="solo">Auf diesem Handy weiterspielen</button>
+    <button class="btn sec" data-act="close">Trotzdem weiter über Ton</button>`,'desync');
+}
+function soloTakeover(){
+  const keep=S; stopSound();
+  mode={kind:'local', me:null}; S=keep; prevSnap=null; lastPhase=null;
+  lsSet(KEY_LOCAL, S); closeSheet(); render();
 }
 
-/* --- Senden mit Bestätigung und Wiederholung --- */
-function enqueue(code){
-  const L=S.link;
-  L.outQ.push({seq:L.txSeq, c:code});
-  L.txSeq=(L.txSeq+1)%36;
-  lsSet(KEY_SND,S);
-  pump();
+/* Klang-Einstellungen */
+function soundSettings(back){
+  const seg=(act,cur,items)=>`<div class="seg">${Object.keys(items).map(k=>`<button class="${k===cur?'on':''}" data-act="${act}" data-v="${k}" data-back="${back}">${items[k].label}</button>`).join('')}</div>`;
+  openSheet(`<h2>Klang</h2>
+    <label>Übertragung</label>
+    ${seg('setMode', prefs.mode, MODES)}
+    <p>${MODES[prefs.mode].desc}</p>
+    ${prefs.mode==='ultra'?`<button class="btn sec" data-act="toggleFb" data-back="${back}">${prefs.fallback?'✓ ':''}Bei Problemen hörbar wiederholen</button>`:''}
+    <label>Hintergrund</label>
+    ${seg('setBg', prefs.bg, BGS)}
+    ${prefs.bg!=='none'?`<label for="bgv">Lautstärke Hintergrund</label><input id="bgv" type="range" min="0" max="1" step="0.05" value="${prefs.bgVol}" style="padding:0">`:''}
+    <p>Der Hintergrund liegt tiefer als die Übertragung und stört sie nicht. Er überdeckt aber leise Töne, falls die hörbare Übertragung einspringt.</p>
+    <button class="btn" data-act="preview" data-back="${back}">Probehören</button>
+    <button class="btn sec" data-act="${back}">Fertig</button>
+    <p>Beide Handys können unterschiedliche Einstellungen haben – sie verstehen sich trotzdem.</p>`, back==='close'?'menu':'start');
+  const r=$('#bgv');
+  if(r) r.addEventListener('input',()=>{ prefs.bgVol=+r.value; savePrefs(); if(snd.bgGain) snd.bgGain.gain.value=prefs.bgVol*0.6; });
 }
-function pump(){
-  const L=S && S.link;
-  if(!L || lk.inflight || !L.outQ.length || !snd.ready) return;
-  lk.inflight=L.outQ[0]; lk.tries=0;
-  txNow();
+async function soundPreview(){
+  try{ await sndInit(); }catch(e){ return; }
+  applyBackground();
+  const seq=tierSeq();
+  await sndPlay('P0zz?probe', seq[0]);
+  if(mode.kind!=='sound'){ clearTimeout(previewTimer); previewTimer=setTimeout(()=>{ if(mode.kind!=='sound') stopSound(); }, 6000); }
 }
-function txNow(){
-  const L=S && S.link, f=lk.inflight;
-  if(!L || !f || !snd.ready) return;
-  lk.tries++;
-  const tr=lk.tries;
-  const proto = tr<=2 ? 'AUDIBLE_FAST' : tr<=4 ? 'AUDIBLE_NORMAL' : (tr%2 ? 'DT_NORMAL' : 'AUDIBLE_NORMAL');
-  const ms=sndPlay('M'+L.sid+L.me+SEQ[f.seq]+f.c, proto, tr===1?70:90);
-  lk.warn = tr>=5;
-  clearTimeout(lk.timer);
-  lk.timer=setTimeout(txNow, ms+(2600+Math.random()*1800+Math.min(tr,8)*350)*TS);
-  sndUI();
+
+/* Kopplung */
+function soundMenu(){
+  const name=lsGet(KEY_NAME)||'';
+  const saved=lsGet(KEY_SOUND);
+  const canResume=saved && saved.S && saved.link && saved.link.started && saved.S.phase!=='over';
+  openSheet(`<h2>Zwei Handys über Ton</h2>
+    <ol class="steps">
+      <li>Legt die Handys nebeneinander und stellt die Lautstärke hoch.</li>
+      <li>Einer tippt „Spiel eröffnen“, der andere „Beitreten“ – die Handys finden sich von selbst.</li>
+      <li>Geht eine Übertragung verloren, wiederholt das Handy sie automatisch.</li>
+    </ol>
+    <p>Klang: ${MODES[prefs.mode].label}, Hintergrund: ${BGS[prefs.bg].label}. Das Mikrofon wird zum Zuhören gebraucht – bitte erlauben.</p>
+    <label for="nm">Dein Name</label><input id="nm" maxlength="10" value="${esc(name)}" placeholder="z. B. Lena">
+    <button class="btn" data-act="soundHost">Spiel eröffnen</button>
+    <button class="btn" data-act="soundJoin">Beitreten</button>
+    ${canResume?`<button class="btn sec" data-act="soundResume">Ton-Spiel fortsetzen (Runde ${saved.S.round})</button>`:''}
+    <button class="btn sec" data-act="soundSettings" data-back="soundMenu">Klang einstellen</button>
+    <button class="btn sec" data-act="soundTest">Ton testen</button>
+    <button class="btn sec" data-act="home">Zurück</button>`, 'start');
 }
-function ackReceived(){
-  clearTimeout(lk.timer);
-  S.link.outQ.shift(); lk.inflight=null; lk.tries=0; lk.warn=false;
-  lsSet(KEY_SND,S);
-  flash('✓ Zug ist angekommen');
-  setTimeout(pump, 300*TS);
+function soundPairSheet(title, text){
+  openSheet(`<h2>${title}</h2>
+    <p id="pst">${text}</p>
+    <div class="meter" aria-hidden="true"><i id="meter"></i></div>
+    <p>Der Balken zeigt, was das Mikrofon im Übertragungsbereich hört.</p>
+    <button class="btn sec" data-act="soundMenu">Abbrechen</button>`, 'pair');
 }
-function sndRetry(){
-  if(lk.inflight){ lk.tries=0; clearTimeout(lk.timer); txNow(); }
-  else pump();
+function micError(e){
+  const msg = e && e.message==='suspended'
+    ? 'Der Ton ist blockiert. Tippe nochmal auf den Knopf.'
+    : 'Das Mikrofon ließ sich nicht starten. Erlaube den Mikrofonzugriff für diese Seite (in den Browser- bzw. Systemeinstellungen) und versuche es erneut.';
+  pstatus(msg,'warn');
 }
-function flash(t){ lk.flash=t; lk.flashT=Date.now()+2200; sndUI(); }
-function sndUI(){
-  const bar=$('#sndBar'); if(!bar) return;
-  if(mode.kind!=='sound'){ return; }
-  let t, c='';
-  if(!snd.ready){ t='Ton ist aus – im Menü neu starten'; c='warn'; }
-  else if(lk.inflight){
-    t = lk.warn ? `Keine Antwort (Versuch ${lk.tries}) – Handys näher, lauter` : `📡 Sende Zug${lk.tries>1?` (Versuch ${lk.tries})`:''} …`;
-    if(lk.warn) c='warn';
+function readName(def){ const nm=$('#nm'); const n=cleanName(nm?nm.value:lsGet(KEY_NAME), def); if(n) lsSet(KEY_NAME,n); return n; }
+function newLink(role){
+  return {role, gid:null, me:role==='host'?'A':'B', seed:null, peer:null, myName:'', seqOut:0, lastIn:0, outbox:[], inflight:null, batch:[], started:false, loud:0, ackMin:0, cleanIn:0};
+}
+async function soundHost(){
+  const myName=readName('Spieler 1');
+  stopSound(); disconnect();
+  mode={kind:'sound', me:0}; S=null; prevSnap=null; lastPhase=null;
+  soundPairSheet('Spiel eröffnen','Mikrofon wird gestartet …');
+  try{ await sndInit(); }catch(e){ return micError(e); }
+  link=newLink('host'); link.gid=randId(2); link.seed=randId(6); link.myName=myName;
+  beaconCount=0;
+  pstatus('Dieses Handy sendet alle paar Sekunden ein Erkennungssignal. Tippe auf dem anderen Handy auf „Beitreten“.');
+  hostBeacon();
+}
+function beaconTier(){
+  // Beim Suchen abwechselnd unhörbar und (bei erlaubter Ausweichlösung) hörbar, damit sich auch „taube“ Handys finden
+  const seq = prefs.mode==='ultra' ? (prefs.fallback?[0,0,2]:[0,1]) : tierSeq();
+  return seq[(beaconCount++)%seq.length];
+}
+function hostBeacon(){
+  clearTimeout(beaconTimer);
+  if(!link || link.role!=='host' || link.started) return;
+  if(!txq.length && !snd.busy) enqueueCtl('H?'+link.gid+'A'+link.seed+link.myName, beaconTier());
+  beaconTimer=setTimeout(hostBeacon, 4500+Math.random()*3000);
+}
+function hostGotJoin(name, tier){
+  if(!link.started){
+    link.peer=cleanName(name,'Spieler 2'); link.started=true;
+    clearTimeout(beaconTimer);
+    for(let i=txq.length-1;i>=0;i--) if(txq[i].text && txq[i].text[0]==='H') txq.splice(i,1);
+    newGame([link.myName, link.peer], {seed:link.seed, gameNo:0});
+    if(sheetKind==='pair') closeSheet();
+    wake();
   }
-  else if(lk.flash){ t=lk.flash; c='ok'; }
-  else t='👂 Hört zu';
-  bar.className=c;
-  $('#sndTxt').textContent=t;
+  link.jCount=(link.jCount||0)+1;
+  enqueueCtl('S?'+link.gid+'A', link.jCount>=3 ? escalate(tier) : tier);
 }
-/* lokale Züge aufzeichnen und übertragen */
-function soundAct(a){
-  if(S.phase==='play' && S.cur!==mode.me && a.t!=='next' && a.t!=='again'){ nudge('msg'); return; }
-  const L=S.link, pre=S.sub, prePhase=S.phase;
-  if(!apply(mode.me, a)){ nudge('msg'); return; }
-  buzz();
-  if(a.t==='card' && prePhase==='setup'){
-    L.sf.push(a.i);
-    if(L.sf.length===2) enqueue('S'+L.sf[0].toString(16)+L.sf[1].toString(16));
-  }
-  else if(a.t==='deck') L.tb='D';
-  else if(a.t==='discard') L.tb = pre==='choose' ? 'T' : pre==='deck' ? 'X' : '';
-  else if(a.t==='card' && prePhase==='play'){
-    enqueue(L.tb + a.i.toString(16) + stateHash());
-    L.tb='';
-  }
-  lsSet(KEY_SND,S);
-  render();
+async function soundJoin(){
+  const myName=readName('Spieler 2');
+  stopSound(); disconnect();
+  mode={kind:'sound', me:1}; S=null; prevSnap=null; lastPhase=null;
+  soundPairSheet('Beitreten','Mikrofon wird gestartet …');
+  try{ await sndInit(); }catch(e){ return micError(e); }
+  link=newLink('join'); link.myName=myName;
+  pstatus('Ich höre zu … Auf dem anderen Handy „Spiel eröffnen“ tippen.');
 }
+function guestFoundHost(gid, seed, hname){
+  if(link.gid && link.gid!==gid) return;
+  if(!link.gid){
+    link.gid=gid; link.seed=seed; link.peer=cleanName(hname,'Spieler 1');
+    beaconCount=0;
+    pstatus(`${esc(link.peer)} gefunden – melde mich an …`);
+    guestBeacon();
+  }
+}
+function guestBeacon(){
+  clearTimeout(beaconTimer);
+  if(!link || link.started) return;
+  enqueueCtl('J?'+link.gid+'B'+link.myName, beaconTier());
+  beaconTimer=setTimeout(guestBeacon, 4500+Math.random()*3000);
+}
+function guestStart(){
+  if(!link || link.started || !link.gid) return;
+  link.started=true; clearTimeout(beaconTimer);
+  for(let i=txq.length-1;i>=0;i--) if(txq[i].text && txq[i].text[0]==='J') txq.splice(i,1);
+  newGame([link.peer, link.myName], {seed:link.seed, gameNo:0});
+  if(sheetKind==='pair') closeSheet();
+  wake();
+}
+async function soundResume(){
+  const saved=lsGet(KEY_SOUND);
+  if(!saved || !saved.link) return soundMenu();
+  stopSound(); disconnect();
+  const L=saved.link;
+  mode={kind:'sound', me:L.me==='A'?0:1};
+  soundPairSheet('Ton-Spiel fortsetzen','Mikrofon wird gestartet …');
+  try{ await sndInit(); }catch(e){ return micError(e); }
+  link=Object.assign(newLink(L.role), {gid:L.gid, seed:L.seed, peer:L.peer, myName:L.myName, seqOut:L.seqOut, lastIn:L.lastIn,
+    outbox:(L.outbox||[]).map(m=>({seq:m.seq, text:m.text})), batch:L.batch||[], started:true, loud:L.loud||0});
+  S=saved.S; prevSnap=null; lastPhase=null;
+  closeSheet(); render(); wake();
+  if(link.batch.length) flush(); else pumpData();
+}
+async function soundRestart(){
+  try{ await sndInit(); closeSheet(); radioKick(); pumpData(); linkUI(); }
+  catch(e){ openSheet(`<h2>Ton pausiert</h2><p class="warn">Mikrofon oder Lautsprecher ließen sich nicht starten. Prüfe den Mikrofonzugriff in den Einstellungen.</p>
+    <button class="btn" data-act="soundRestart">Nochmal versuchen</button><button class="btn sec" data-act="solo">Auf diesem Handy weiterspielen</button>`,'pause'); }
+}
+async function soundWakeUp(){
+  try{ await sndInit(); radioKick(); pumpData(); }
+  catch(e){
+    openSheet(`<h2>Ton pausiert</h2><p class="lead">Das Handy war kurz im Hintergrund. Tippe, um wieder zuzuhören.</p>
+      <button class="btn" data-act="soundRestart">Weiterspielen</button>`,'pause');
+  }
+}
+function linkUI(){
+  const p=$('#linkPill'); if(!p) return;
+  if(mode.kind!=='sound' || !S){ p.style.display='none'; return; }
+  p.style.display='block';
+  let icon='👂', warn=false, label='Hört zu';
+  if(!snd.ready){ icon='🔇'; warn=true; label='Ton aus'; }
+  else if(snd.busy){ icon=prefs.bg==='sea'?'🌊':prefs.bg==='rain'?'🌧️':prefs.bg==='fire'?'🔥':'📡'; label='Sendet'; }
+  else if(link && link.inflight){ const tr=link.inflight.tries||0; icon=tr>=5?'⚠️':'⏳'; warn=tr>=5; label='Wartet auf Bestätigung'; }
+  p.textContent=icon; p.classList.toggle('warn',warn); p.setAttribute('aria-label','Ton-Verbindung: '+label);
+}
+function linkSheet(){
+  if(mode.kind!=='sound') return;
+  const tr=link && link.inflight ? (link.inflight.tries||0) : 0;
+  const state = !snd.ready ? 'Ton ist aus.' : link && link.inflight ? `Ein Zug wartet auf Bestätigung (Versuch ${tr}).` : 'Alles übertragen.';
+  const loudNote = prefs.mode==='ultra' && link && link.loud>=2 ? '<p>Ultraschall kommt zwischen euren Handys gerade schlecht an – es wird hörbar übertragen.</p>' : '';
+  openSheet(`<h2>Ton-Verbindung</h2>
+    <p class="lead">${state}</p>${loudNote}
+    <div class="meter" aria-hidden="true"><i id="meter"></i></div>
+    <p>Klappt die Übertragung nicht: Handys näher zusammen, Lautstärke hoch, Lautsprecher nicht abdecken – oder unter „Klang“ auf „Robust“ wechseln.</p>
+    <button class="btn" data-act="close">Zurück zum Spiel</button>
+    <button class="btn sec" data-act="soundSettings" data-back="close">Klang</button>
+    <button class="btn sec" data-act="soundRestart">Ton neu starten</button>
+    <button class="btn sec" data-act="solo">Auf diesem Handy weiterspielen</button>`,'menu');
+}
+async function soundTest(){
+  readName('');
+  openSheet(`<h2>Ton testen</h2><p id="pst">Starte …</p><div class="meter" aria-hidden="true"><i id="meter"></i></div>
+    <p>Das Handy sendet und versucht, sich selbst zu hören – erst unhörbar, dann hörbar.</p>
+    <button class="btn sec" data-act="soundMenu">Zurück</button>`,'pair');
+  try{ await sndInit(); }catch(e){ return micError(e); }
+  const results=[];
+  for(const [tier,name] of [[0,'Unhörbar'],[2,'Hörbar']]){
+    snd.testWant='T'+tier+randId(4);
+    pstatus(`Teste „${name}“ …`);
+    const want=snd.testWant;
+    await sndPlay(want, tier);
+    await sleep(1600);
+    results.push([name, snd.testWant!==want || snd.testWant===null]);
+    snd.testWant=null;
+  }
+  const [u,a]=results.map(r=>r[1]);
+  let msg;
+  if(u && a) msg='Beides funktioniert auf diesem Handy. 👍 „Unhörbar“ ist eine gute Wahl.';
+  else if(a) msg='Hörbar klappt, Ultraschall nicht. Wähle unter „Klang“ besser „Leise“ oder „Robust“.';
+  else if(u) msg='Ultraschall klappt, hörbar nicht – ungewöhnlich, aber „Unhörbar“ passt.';
+  else msg='Das Handy hat sich nicht gehört. Lautstärke hoch und nochmal versuchen. Manche Handys hören sich selbst schlecht – mit zwei Handys kann es trotzdem klappen.';
+  pstatus(msg, u||a?'':'warn');
+  if(mode.kind!=='sound'){ clearTimeout(previewTimer); previewTimer=setTimeout(()=>{ if(mode.kind!=='sound' && sheetKind!=='pair') stopSound(); }, 4000); }
+}
+function soundTestOk(){}
 
 /* ---------- Events ---------- */
 document.addEventListener('click', ev=>{
@@ -1194,18 +1438,25 @@ document.addEventListener('click', ev=>{
   if(a){
     const act=a.dataset.act;
     if(act==='localMenu') localMenu();
+    else if(act==='soundMenu'){ stopSound(); mode={kind:'local',me:null}; soundMenu(); }
+    else if(act==='soundHost') soundHost();
+    else if(act==='soundJoin') soundJoin();
+    else if(act==='soundResume') soundResume();
+    else if(act==='soundTest') soundTest();
+    else if(act==='soundSettings') soundSettings(a.dataset.back||'soundMenu');
+    else if(act==='setMode'){ prefs.mode=a.dataset.v; savePrefs(); if(link) link.loud=0; soundSettings(a.dataset.back); }
+    else if(act==='setBg'){ prefs.bg=a.dataset.v; savePrefs(); if(snd.ctx) applyBackground(true); soundSettings(a.dataset.back); }
+    else if(act==='toggleFb'){ prefs.fallback=!prefs.fallback; savePrefs(); soundSettings(a.dataset.back); }
+    else if(act==='preview') soundPreview();
+    else if(act==='soundRestart') soundRestart();
+    else if(act==='linkInfo') linkSheet();
+    else if(act==='solo') soloTakeover();
     else if(act==='netMenu'){ disconnect(); mode={kind:'local',me:null}; netMenu(); }
     else if(act==='localStart'){
       const n0=$('#n0').value.trim()||'Spieler 1', n1=$('#n1').value.trim()||'Spieler 2';
       mode={kind:'local',me:null}; closeSheet(); newGame([n0,n1]); wake();
     }
     else if(act==='localResume'){ mode={kind:'local',me:null}; S=lsGet(KEY_LOCAL); prevSnap=null; lastPhase=null; closeSheet(); render(); wake(); }
-    else if(act==='sndMenu'){ sndStop(); disconnect(); mode={kind:'local',me:null}; sndMenu(); }
-    else if(act==='sndHost') sndHost();
-    else if(act==='sndJoin') sndJoin();
-    else if(act==='sndResume') sndResume();
-    else if(act==='sndRestart') sndRestart();
-    else if(act==='sndRetry'){ closeSheet(); sndRetry(); }
     else if(act==='host') hostStart(false);
     else if(act==='hostResume') hostStart(true);
     else if(act==='join') joinStart();
@@ -1225,6 +1476,7 @@ document.addEventListener('click', ev=>{
   if(ev.target.closest('#discard')){ localAct({t:'discard'}); return; }
 });
 $('#menuBtn').addEventListener('click', e=>{ e.stopPropagation(); if(S) menu(); else startScreen(); });
+$('#linkPill').addEventListener('click', e=>{ e.stopPropagation(); linkSheet(); });
 $('#resBtn').addEventListener('click', e=>{ e.stopPropagation(); showResult(); });
 $('#ov').addEventListener('click', e=>{ if(e.target.id==='ov' && S && (sheetKind==='menu'||sheetKind==='rules'||sheetKind==='result')) closeSheet(); });
 
@@ -1232,7 +1484,7 @@ function fit(){
   const app=$('#app'); const H=app.clientHeight, W=app.clientWidth;
   const centerH=Math.max(120, Math.min(160, H*0.19));
   const gap=H<640?4:6;
-  const avail=H-centerH-2*(22+12+6+8)-4*gap-(mode.kind==='sound'?22:0);
+  const avail=H-centerH-2*(22+12+6+8)-4*gap;
   let cw=Math.min(avail/6/1.38, (W-28-3*gap)/4, 96);
   cw=Math.max(30,cw);
   const pw=Math.max(30, Math.min(cw*0.82, (centerH-62)/1.38));
@@ -1244,6 +1496,7 @@ window.addEventListener('resize', fit);
 window.addEventListener('orientationchange', ()=>setTimeout(fit,200));
 fit();
 startScreen();
+if(location.hash==='#selftest') window.__w12=()=>({S, link, mode, txq:txq.length});
 
 if('serviceWorker' in navigator && location.protocol==='https:'){
   window.addEventListener('load', ()=>{ navigator.serviceWorker.register('sw.js').catch(()=>{}); });

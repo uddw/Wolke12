@@ -1,5 +1,5 @@
 // Wolke 12 – Service Worker: speichert alle Dateien, damit das Spiel offline startet.
-const CACHE = 'wolke12-v2';
+const CACHE = 'wolke12-v4';
 const FILES = ['./', './index.html', './manifest.webmanifest', './icon-192.png', './icon-512.png', './apple-touch-icon.png'];
 
 self.addEventListener('install', e => {
